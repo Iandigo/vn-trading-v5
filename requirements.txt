@@ -1,0 +1,9 @@
+yfinance>=0.2.38
+pandas>=2.0.0
+numpy>=1.24.0
+# React dashboard backend
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+# Legacy Streamlit dashboard (optional)
+streamlit>=1.35.0
+plotly>=5.20.0
