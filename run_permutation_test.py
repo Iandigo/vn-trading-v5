@@ -40,6 +40,7 @@ def run_permutation_test(
     capital: float = 500_000_000,
     use_real: bool = False,
     metric: str = "sharpe",
+    strategy: str = "carver",
     verbose: bool = True,
     progress_callback=None,
 ) -> dict:
@@ -89,9 +90,13 @@ def run_permutation_test(
 
     # ── Run real strategy ─────────────────────────────────────────────────────
     if verbose:
-        print(f"\n  Running REAL strategy...")
-    from backtesting.engine import BacktestEngine
-    engine = BacktestEngine(capital=capital)
+        print(f"\n  Running REAL strategy ({strategy})...")
+    if strategy == "martin_luk":
+        from strategies.martin_luk import MartinLukEngine
+        engine = MartinLukEngine(capital=capital)
+    else:
+        from backtesting.engine import BacktestEngine
+        engine = BacktestEngine(capital=capital)
     real_results = engine.run(close_matrix, ohlcv_dict, index_prices, verbose=False)
     real_metric = real_results["metrics"].get(metric, 0.0)
 
@@ -182,6 +187,7 @@ def run_permutation_test(
             ohlcv_aligned,
             capital,
             metric,
+            strategy,
         ))
 
     perm_metrics = [None] * n_perm
@@ -287,6 +293,7 @@ def _run_single_permutation(args) -> float:
         ohlcv_aligned,
         capital,
         metric,
+        strategy,
     ) = args
 
     # Shuffle returns using pre-computed index
@@ -322,8 +329,12 @@ def _run_single_permutation(args) -> float:
         }, index=common_idx)
 
     # Run backtest
-    from backtesting.engine import BacktestEngine
-    eng = BacktestEngine(capital=capital)
+    if strategy == "martin_luk":
+        from strategies.martin_luk import MartinLukEngine
+        eng = MartinLukEngine(capital=capital)
+    else:
+        from backtesting.engine import BacktestEngine
+        eng = BacktestEngine(capital=capital)
     res = eng.run(new_close, new_ohlcv, new_index, verbose=False)
     return res["metrics"].get(metric, 0.0)
 
@@ -369,6 +380,7 @@ if __name__ == "__main__":
     parser.add_argument("--capital", type=float, default=500_000_000)
     parser.add_argument("--real",    action="store_true")
     parser.add_argument("--metric",  type=str,   default="sharpe",    help="sharpe or cagr")
+    parser.add_argument("--strategy", type=str,  default="carver",    choices=["carver", "martin_luk"])
     args = parser.parse_args()
 
     run_permutation_test(
@@ -378,4 +390,5 @@ if __name__ == "__main__":
         capital=args.capital,
         use_real=args.real,
         metric=args.metric,
+        strategy=args.strategy,
     )

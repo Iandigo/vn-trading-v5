@@ -2,8 +2,8 @@ import {
   BarChart2,
   BookOpen,
   Clock,
+  Crosshair,
   FlaskConical,
-  LayoutDashboard,
   Play,
   Settings,
   Thermometer,
@@ -17,14 +17,15 @@ interface SidebarProps {
 }
 
 const NAV: { id: Page; label: string; icon: React.FC<{ size?: number; className?: string }> }[] = [
+  { id: 'scanner',     label: 'Live Scanner',      icon: Crosshair },
+  { id: 'portfolio',   label: 'Portfolio',          icon: Wallet },
+  { id: 'run',         label: 'Run Backtest',      icon: Play },
   { id: 'results',     label: 'Backtest Results',  icon: BarChart2 },
   { id: 'trades',      label: 'Backtest Trades',   icon: BookOpen },
   { id: 'history',     label: 'Backtest History',  icon: Clock },
   { id: 'permutation', label: 'Permutation Test',  icon: FlaskConical },
   { id: 'regime',      label: 'Regime Status',     icon: Thermometer },
-  { id: 'portfolio',   label: 'Live Portfolio',    icon: Wallet },
   { id: 'config',      label: 'Config',            icon: Settings },
-  { id: 'run',         label: 'Run Backtest',      icon: Play },
 ]
 
 export default function Sidebar({ current, onChange }: SidebarProps) {

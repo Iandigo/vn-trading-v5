@@ -11,6 +11,7 @@ import {
   YAxis,
 } from 'recharts'
 import { fetchPermutation, startPermutation, fetchJob } from '../api/client'
+import type { Strategy } from '../types'
 
 function buildHistogram(values: number[], bins = 30) {
   // Filter out extreme/invalid values (NaN, Inf, or abs > 100)
@@ -46,6 +47,7 @@ export default function PermutationTest() {
   const [nStocks, setNStocks] = useState(10)
   const [useReal, setUseReal] = useState(false)
   const [metric, setMetric] = useState<'sharpe' | 'cagr'>('sharpe')
+  const [strategy, setStrategy] = useState<Strategy>('carver')
   const [jobId, setJobId] = useState<string | null>(null)
   const [jobDone, setJobDone] = useState(false)
 
@@ -103,7 +105,14 @@ export default function PermutationTest() {
           Shuffles daily returns to destroy momentum/regime signals, then re-runs the full backtest on each shuffle.
           If your real strategy beats most shuffles, the edge is statistically real.
         </p>
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
+          <div>
+            <label className="label">Strategy</label>
+            <select className="select" value={strategy} onChange={e => setStrategy(e.target.value as Strategy)}>
+              <option value="carver">Carver</option>
+              <option value="martin_luk">Martin Luk</option>
+            </select>
+          </div>
           <div>
             <label className="label">Permutations</label>
             <input type="number" className="input" value={nPerm} min={10} max={1000}
@@ -138,7 +147,7 @@ export default function PermutationTest() {
         <div className="space-y-2">
           <div className="flex items-center gap-3">
             <button className="btn-primary" disabled={!!isRunning}
-              onClick={() => runMut.mutate({ n_perm: nPerm, years, n_stocks: nStocks, use_real: useReal, metric })}>
+              onClick={() => runMut.mutate({ n_perm: nPerm, years, n_stocks: nStocks, use_real: useReal, metric, strategy })}>
               {isRunning ? 'Running...' : 'Run Permutation Test'}
             </button>
             {jobDone && jobData?.status === 'failed' && (

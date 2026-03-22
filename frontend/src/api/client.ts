@@ -8,6 +8,7 @@ import type {
   PermutationData,
   PortfolioData,
   RegimeData,
+  ScannerData,
   Trade,
 } from '../types'
 
@@ -75,6 +76,37 @@ export async function fetchPortfolio(): Promise<PortfolioData> {
   return data
 }
 
+export interface TradeRecordParams {
+  ticker: string
+  action: 'BUY' | 'SELL'
+  shares: number
+  price: number
+  stop_price?: number
+  r_value?: number
+  pattern?: string
+  strategy?: string
+  note?: string
+}
+
+export async function recordTrade(params: TradeRecordParams): Promise<{ recorded: boolean }> {
+  const { data } = await api.post('/portfolio/trade', params)
+  return data
+}
+
+export async function deleteTrade(index: number): Promise<void> {
+  await api.delete(`/portfolio/trade/${index}`)
+}
+
+export async function deleteHolding(ticker: string): Promise<void> {
+  await api.delete(`/portfolio/holding/${encodeURIComponent(ticker)}`)
+}
+
+// ─── Scanner ─────────────────────────────────────────────────────────────────
+export async function fetchScanner(nStocks = 30, equity = 500_000_000): Promise<ScannerData> {
+  const { data } = await api.get('/scanner', { params: { n_stocks: nStocks, equity } })
+  return data
+}
+
 // ─── Universe ─────────────────────────────────────────────────────────────────
 export async function fetchUniverse(): Promise<string[]> {
   const { data } = await api.get('/universe')
@@ -87,6 +119,7 @@ export interface BacktestParams {
   years: number
   capital: number
   use_real: boolean
+  strategy?: 'carver' | 'martin_luk'
   config_overrides?: Record<string, number | boolean>
 }
 
@@ -96,6 +129,7 @@ export interface PermutationParams {
   n_stocks: number
   use_real: boolean
   metric: string
+  strategy?: 'carver' | 'martin_luk'
 }
 
 export async function startBacktest(params: BacktestParams): Promise<string> {

@@ -2,14 +2,12 @@ import { useState, useEffect, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Play, CheckCircle, XCircle, Loader } from 'lucide-react'
 import { startBacktest, fetchJob, fetchUniverse } from '../api/client'
-import type { Job, Metrics } from '../types'
+import type { Job, Metrics, Strategy } from '../types'
+import { fmtPct, fmtNum } from '../utils/format'
 
 interface Props {
   onDone: () => void
 }
-
-const fmtPct = (v: number | undefined) => (v == null ? '—' : `${(v * 100).toFixed(1)}%`)
-const fmtNum = (v: number | undefined) => (v == null ? '—' : v.toFixed(2))
 
 const STAGE_LABELS: Record<string, string> = {
   queued:           'Queued...',
@@ -27,6 +25,7 @@ export default function RunBacktest({ onDone }: Props) {
   const { data: universe = [] } = useQuery({ queryKey: ['universe'], queryFn: fetchUniverse })
 
   // Form state
+  const [strategy, setStrategy] = useState<Strategy>('carver')
   const [nStocks, setNStocks] = useState(15)
   const [years, setYears] = useState(3)
   const [capital, setCapital] = useState(500_000_000)
@@ -73,14 +72,14 @@ export default function RunBacktest({ onDone }: Props) {
   })
 
   const handleRun = () => {
-    runMut.mutate({ n_stocks: nStocks, years, capital, use_real: useReal })
+    runMut.mutate({ n_stocks: nStocks, years, capital, use_real: useReal, strategy })
   }
 
   const isRunning = !!jobId && !jobDone
 
   const metrics: Metrics | null = liveJob?.result?.metrics ?? null
 
-  const SCORECARD_QUICK = [
+  const CARVER_SCORECARD = [
     { key: 'cagr' as keyof Metrics,         label: 'CAGR',       fmt: fmtPct, pass: (v: number) => v >= 0.045, target: '> 4.5%' },
     { key: 'sharpe' as keyof Metrics,       label: 'Sharpe',     fmt: fmtNum, pass: (v: number) => v >= 0.40,  target: '> 0.40' },
     { key: 'max_drawdown' as keyof Metrics, label: 'Max DD',     fmt: fmtPct, pass: (v: number) => v > -0.30,  target: '> -30%' },
@@ -89,9 +88,54 @@ export default function RunBacktest({ onDone }: Props) {
     { key: 'win_rate' as keyof Metrics,     label: 'Win Rate',   fmt: fmtPct, pass: (v: number) => v >= 0.45,  target: '> 45%' },
   ]
 
+  const MARTIN_LUK_SCORECARD = [
+    { key: 'cagr' as keyof Metrics,         label: 'CAGR',        fmt: fmtPct, pass: (v: number) => v >= 0.045, target: '> 4.5%' },
+    { key: 'sharpe' as keyof Metrics,       label: 'Sharpe',      fmt: fmtNum, pass: (v: number) => v >= 0.40,  target: '> 0.40' },
+    { key: 'expectancy' as keyof Metrics,   label: 'Expectancy',  fmt: (v: number) => `${v.toFixed(2)}R`, pass: (v: number) => v > 0.5, target: '> 0.5R' },
+    { key: 'max_drawdown' as keyof Metrics, label: 'Max DD',      fmt: fmtPct, pass: (v: number) => v > -0.30, target: '> -30%' },
+    { key: 'avg_winner_r' as keyof Metrics, label: 'Avg Winner',  fmt: (v: number) => `${v.toFixed(1)}R`, pass: (v: number) => v >= 3.0, target: '> 3.0R' },
+    { key: 'avg_loser_r' as keyof Metrics,  label: 'Avg Loser',   fmt: (v: number) => `${v.toFixed(1)}R`, pass: (v: number) => v > -1.5, target: '> -1.5R' },
+    { key: 'win_rate' as keyof Metrics,     label: 'Win Rate',    fmt: fmtPct, pass: (v: number) => v >= 0.20, target: '> 20%' },
+  ]
+
+  const SCORECARD_QUICK = strategy === 'martin_luk' ? MARTIN_LUK_SCORECARD : CARVER_SCORECARD
+
   return (
     <div className="space-y-6 max-w-3xl">
       <h1 className="text-2xl font-bold text-gray-100">Run Backtest</h1>
+
+      {/* Strategy selector */}
+      <div className="card space-y-3">
+        <h2 className="text-base font-semibold text-gray-200">Strategy</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <label className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+            strategy === 'carver' ? 'border-primary bg-primary/10' : 'border-border hover:border-gray-600'
+          }`}>
+            <input type="radio" name="strategy" checked={strategy === 'carver'}
+              onChange={() => setStrategy('carver')} className="accent-primary mt-1" />
+            <div>
+              <p className="text-sm font-medium text-gray-200">Carver — Momentum + Mean Reversion</p>
+              <p className="text-xs text-gray-500 mt-1">
+                Cross-sectional momentum (55%) + IBS mean reversion (15%).
+                Vol-based sizing with buffer zones. Monthly rebalance.
+              </p>
+            </div>
+          </label>
+          <label className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+            strategy === 'martin_luk' ? 'border-primary bg-primary/10' : 'border-border hover:border-gray-600'
+          }`}>
+            <input type="radio" name="strategy" checked={strategy === 'martin_luk'}
+              onChange={() => setStrategy('martin_luk')} className="accent-primary mt-1" />
+            <div>
+              <p className="text-sm font-medium text-gray-200">Martin Luk — Swing Breakout</p>
+              <p className="text-xs text-gray-500 mt-1">
+                EMA alignment breakouts with 0.75% fixed risk per trade.
+                Trailing stops + partial exits at 3R/5R. Adapted for VN30.
+              </p>
+            </div>
+          </label>
+        </div>
+      </div>
 
       {/* Parameters form */}
       <div className="card space-y-5">
@@ -246,8 +290,15 @@ export default function RunBacktest({ onDone }: Props) {
           </div>
 
           <div className="text-xs text-gray-500">
-            Period: {metrics.start_date} → {metrics.end_date} ({metrics.n_years?.toFixed(1)}y) ·{' '}
-            {metrics.n_trades} total trades · Bull regime {fmtPct(metrics.regime_pct_bull)} of time
+            <span className="font-medium text-gray-400">{strategy === 'martin_luk' ? 'Martin Luk' : 'Carver'}</span>
+            {' · '}Period: {metrics.start_date} → {metrics.end_date} ({metrics.n_years?.toFixed(1)}y) ·{' '}
+            {metrics.n_trades} total trades
+            {strategy === 'martin_luk' ? (
+              <>{' · '}Avg hold: {(metrics as any).avg_holding_days?.toFixed(0) ?? '?'}d ·{' '}
+              Max consec losses: {(metrics as any).max_consecutive_losses ?? '?'}</>
+            ) : (
+              <>{' · '}Bull regime {fmtPct(metrics.regime_pct_bull)} of time</>
+            )}
           </div>
         </div>
       )}

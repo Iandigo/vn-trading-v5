@@ -187,6 +187,60 @@ DATA = {
     "request_timeout": 30,
 }
 
+# ─── Martin Luk Swing Strategy ────────────────────────────────────────────────
+# Adapted from Martin Luk's USIC 1358% return swing trading method.
+# Modified for VN30 daily bars: wider stops, higher base risk, T+2.5 settlement.
+MARTIN_LUK = {
+    # EMA Alignment
+    "ema_fast": 9,
+    "ema_mid": 21,
+    "ema_slow": 50,
+
+    # ADR Filter
+    "adr_period": 20,           # 20-day rolling ADR
+    "adr_min_pct": 0.025,       # 2.5% minimum (lowered from 5% for VN blue chips)
+
+    # Entry
+    "breakout_confirm_close": True,   # Require close above level (not just intraday)
+    "inside_day_enabled": True,       # Enable inside-day breakout pattern
+    "ema_convergence_pct": 0.015,     # 1.5% spread threshold for EMA convergence
+
+    # Stop Loss
+    "max_stop_pct": 0.05,       # 5% max stop distance (wider than Luk's 3.5% for VN daily)
+    "stop_method": "breakout_low",    # "breakout_low" = low of breakout day
+
+    # Position Sizing
+    "risk_per_trade_pct": 0.0075,     # 0.75% of equity per trade (moderate)
+    "risk_drawdown_pct": 0.00375,     # Halved to 0.375% during drawdowns
+    "drawdown_threshold": 0.10,       # Start reducing risk at 10% drawdown from peak
+    "max_position_pct": 0.10,         # Max 10% of equity per stock
+    "max_total_exposure": 0.80,       # Max 80% total portfolio exposure
+
+    # Exit / Partials
+    "partial_1_r": 3.0,         # First partial sell at 3R profit
+    "partial_1_pct": 0.25,      # Sell 25% of position
+    "partial_2_r": 5.0,         # Second partial at 5R profit
+    "partial_2_pct": 0.25,      # Sell another 25%
+    "trail_ema": 9,             # Trail stop with EMA(9) after partial 2
+    "exit_ema": 21,             # Full exit when close < EMA(21) after partials
+
+    # Market Health (leader count breadth)
+    "health_strong_pct": 0.50,  # >= 50% leaders = STRONG → full risk
+    "health_cautious_pct": 0.27, # 27-49% leaders = CAUTIOUS → half risk
+
+    # Settlement (HOSE)
+    "settlement_days": 3,       # T+2.5 — can't sell until day 3
+
+    # Lot size (HOSE)
+    "lot_size": 100,
+
+    # Transaction costs (same as Carver)
+    "cost_per_trade_pct": 0.0025,
+
+    # Warmup bars for EMA(50)
+    "warmup_bars": 60,
+}
+
 # ─── Backtest ─────────────────────────────────────────────────────────────────
 BACKTEST = {
     # Regime recalculated WEEKLY (not daily — prevents whipsaw, v4 bug lesson)

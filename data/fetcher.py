@@ -115,7 +115,7 @@ def fetch_multi(
         from_cache = _cache_covers(cached, start, end)
 
         if verbose:
-            tag = "📂 cache" if from_cache else "🌐 fetch"
+            tag = "[cache]" if from_cache else "[fetch]"
             print(f"  {tag}  {ticker} ({i+1}/{len(tickers)})")
 
         df = fetch_ohlcv(ticker, start, end, use_cache=use_cache)
@@ -271,9 +271,9 @@ def _fetch_with_fallback(ticker: str, start: datetime, end: datetime, chunk_days
             vn = _fetch_vnstock(ticker, cursor, chunk_end)
             if vn is not None and not vn.empty:
                 all_chunks.append(vn)
-                print(f"  [fetcher] Data for {ticker} {chunk_start_str}→{chunk_end_str} from vnstock")
+                print(f"  [fetcher] Data for {ticker} {chunk_start_str} -> {chunk_end_str} from vnstock")
             else:
-                print(f"  [fetcher] No data for {ticker} {chunk_start_str}→{chunk_end_str} from either source")
+                print(f"  [fetcher] No data for {ticker} {chunk_start_str} -> {chunk_end_str} from either source")
 
         cursor = chunk_end + timedelta(days=1)
         time.sleep(0.2)
@@ -390,7 +390,7 @@ def _fetch_vnstock(ticker: str, start: datetime, end: datetime) -> pd.DataFrame 
 
 
 def _clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
-    """Standardise column names, remove bad rows, forward-fill gaps."""
+    """Standardise column names, remove bad rows, detect price spikes, forward-fill gaps."""
     col_map = {
         "open": "open", "high": "high", "low": "low",
         "close": "close", "volume": "volume",
@@ -406,6 +406,33 @@ def _clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     df = df[required + (["volume"] if "volume" in df.columns else [])].copy()
     df = df[(df["close"] > 0) & (df["high"] >= df["low"])]
     df = df.sort_index()
+
+    # ── Detect corrupted prices (spikes >50% day-to-day) ──────────────────
+    # VN stocks have ±7% daily limit (HOSE), so any >50% jump is data corruption
+    # from yfinance auto_adjust miscalculating corporate actions.
+    if len(df) > 1:
+        pct_change = df["close"].pct_change().abs()
+        spike_mask = pct_change > 0.50  # 50% daily change = impossible on HOSE
+        spike_mask.iloc[0] = False      # first row has NaN pct_change
+        n_spikes = spike_mask.sum()
+        if n_spikes > 0:
+            # Remove the corrupted rows (and everything after if it's a level shift)
+            first_spike_idx = spike_mask.idxmax()
+            # Check if it's a level shift (prices stay high) vs isolated spike
+            post_spike = df.loc[first_spike_idx:, "close"]
+            pre_spike = df.loc[:first_spike_idx, "close"].iloc[:-1]
+            if len(pre_spike) > 0 and len(post_spike) > 1:
+                pre_median = pre_spike.tail(20).median()
+                post_median = post_spike.head(5).median()
+                if post_median > pre_median * 2:
+                    # Level shift — all data from spike onward is corrupted
+                    df = df.loc[:first_spike_idx].iloc[:-1]
+                    print(f"  [clean] Removed {n_spikes} corrupted rows from {first_spike_idx} onward (price level shift)")
+                else:
+                    # Isolated spikes — just remove those rows
+                    df = df[~spike_mask]
+                    print(f"  [clean] Removed {n_spikes} price spike rows")
+
     df = df.ffill()
     df = df.dropna()
     return df
@@ -439,15 +466,30 @@ def fetch_index_prices(
     for ticker in [primary_ticker] + (fallback_tickers or []):
         df = fetch_ohlcv(ticker, start, end, use_cache=use_cache)
         if not df.empty:
+            close = df["close"]
+            # Scale sanity check: VNIndex has always been > 100 points.
+            # Some data sources (vnstock, yfinance auto_adjust) return values
+            # divided by 1000 (e.g., 1.16 instead of 1160).
+            median_val = float(close.median())
+            if median_val < 100:
+                scale = 1000.0
+                close = close * scale
+                print(f"  [index] Rescaled {ticker} by {scale}x (median was {median_val:.2f}, now {median_val*scale:.0f})")
+                # Re-save corrected data to cache
+                df_corrected = df.copy()
+                for col in ["open", "high", "low", "close"]:
+                    if col in df_corrected.columns:
+                        df_corrected[col] = df_corrected[col] * scale
+                _cache_save(ticker, df_corrected)
             print(f"  [index] Using {ticker} as market index proxy")
-            return df["close"]
+            return close
 
     # Final fallback: equal-weight mean of the portfolio universe
     if universe_close_matrix is not None and not universe_close_matrix.empty:
-        print("  [index] ⚠️  All index tickers failed — using universe mean as regime proxy")
+        print("  [index] WARNING: All index tickers failed -- using universe mean as regime proxy")
         proxy = universe_close_matrix.mean(axis=1)
         proxy.name = "vnindex_proxy"
         return proxy
 
-    print("  [index] ❌ No index data available at all")
+    print("  [index] ERROR: No index data available at all")
     return pd.Series(dtype=float)

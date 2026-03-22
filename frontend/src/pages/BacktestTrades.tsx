@@ -12,12 +12,7 @@ import {
 } from 'recharts'
 import { fetchHistory, fetchTrades } from '../api/client'
 import type { BacktestRun, Trade } from '../types'
-
-const fmtVnd = (v: number) => {
-  if (Math.abs(v) >= 1e9) return `${(v / 1e9).toFixed(1)}B`
-  if (Math.abs(v) >= 1e6) return `${(v / 1e6).toFixed(1)}M`
-  return v.toLocaleString()
-}
+import { fmtVnd } from '../utils/format'
 
 interface WinLossRow {
   ticker: string
@@ -91,6 +86,10 @@ export default function BacktestTrades() {
   })
 
   const [filter, setFilter] = useState('')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
+  const [page, setPage] = useState(1)
+  const pageSize = 50
 
   const buys = trades.filter(t => t.action === 'BUY').length
   const sells = trades.filter(t => t.action === 'SELL').length
@@ -123,9 +122,23 @@ export default function BacktestTrades() {
   const overallPnl = wlRows.reduce((s, r) => s + r.totalPnl, 0)
   const overallWr = overallWins + overallLosses > 0 ? overallWins / (overallWins + overallLosses) : 0
 
-  const filteredTrades = filter
-    ? trades.filter(t => t.ticker.includes(filter.toUpperCase()) || t.action.includes(filter.toUpperCase()))
-    : trades
+  const selectedRun = runs.find(r => r.run_id === runId)
+  const isSwing = selectedRun?.params?.strategy === 'martin_luk' ||
+    trades.some(t => t.reason != null && t.reason !== '')
+
+  const filteredTrades = trades.filter(t => {
+    if (filter && !t.ticker.includes(filter.toUpperCase()) && !t.action.includes(filter.toUpperCase())
+        && !(t.reason && t.reason.toLowerCase().includes(filter.toLowerCase()))) return false
+    const d = t.date.slice(0, 10)
+    if (dateFrom && d < dateFrom) return false
+    if (dateTo && d > dateTo) return false
+    return true
+  })
+
+  const sortedTrades = [...filteredTrades].sort((a, b) => b.date.localeCompare(a.date))
+  const totalPages = Math.max(1, Math.ceil(sortedTrades.length / pageSize))
+  const safePage = Math.min(page, totalPages)
+  const pagedTrades = sortedTrades.slice((safePage - 1) * pageSize, safePage * pageSize)
 
   if (isLoading) return <div className="text-gray-400 text-sm">Loading trades...</div>
 
@@ -149,7 +162,7 @@ export default function BacktestTrades() {
             onChange={e => setSelectedRunId(e.target.value)}>
             {[...runs].reverse().map(r => (
               <option key={r.run_id} value={r.run_id}>
-                {r.timestamp} — {r.params.n_stocks}s {r.params.years}y [{r.params.data_source}]
+                {r.timestamp} — {r.params.strategy === 'martin_luk' ? 'Luk' : 'Carver'} {r.params.n_stocks}s {r.params.years}y [{r.params.data_source}]
               </option>
             ))}
           </select>
@@ -272,22 +285,43 @@ export default function BacktestTrades() {
 
       {/* Full trade table */}
       <div className="card">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-wrap items-center gap-3 mb-4">
           <h2 className="text-lg font-semibold text-gray-200">All Trades</h2>
+          <div className="flex-1" />
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-gray-500">From</label>
+            <input type="date" className="input text-sm w-36" value={dateFrom}
+              onChange={e => { setDateFrom(e.target.value); setPage(1) }} />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-gray-500">To</label>
+            <input type="date" className="input text-sm w-36" value={dateTo}
+              onChange={e => { setDateTo(e.target.value); setPage(1) }} />
+          </div>
+          {(dateFrom || dateTo) && (
+            <button className="text-xs text-gray-500 hover:text-gray-300" onClick={() => { setDateFrom(''); setDateTo(''); setPage(1) }}>
+              Clear dates
+            </button>
+          )}
           <input className="input text-sm w-48" placeholder="Filter ticker / action..."
-            value={filter} onChange={e => setFilter(e.target.value)} />
+            value={filter} onChange={e => { setFilter(e.target.value); setPage(1) }} />
         </div>
-        <div className="overflow-x-auto max-h-96 overflow-y-auto">
+        <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-card">
               <tr className="text-gray-500 text-xs uppercase border-b border-border">
-                {['Date','Ticker','Action','Shares','Price','Value','Fee','Regime','Forecast'].map(h => (
-                  <th key={h} className="py-2 pr-4 text-left">{h}</th>
-                ))}
+                {isSwing
+                  ? ['Date','Ticker','Action','Shares','Price','Value','Fee','Reason','R-Multiple'].map(h => (
+                      <th key={h} className="py-2 pr-4 text-left">{h}</th>
+                    ))
+                  : ['Date','Ticker','Action','Shares','Price','Value','Fee','Regime','Forecast'].map(h => (
+                      <th key={h} className="py-2 pr-4 text-left">{h}</th>
+                    ))
+                }
               </tr>
             </thead>
             <tbody>
-              {[...filteredTrades].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 200).map((t, i) => (
+              {pagedTrades.map((t, i) => (
                 <tr key={i} className="border-b border-border/30 hover:bg-white/2">
                   <td className="py-1.5 pr-4 text-gray-400">{t.date.slice(0, 10)}</td>
                   <td className="py-1.5 pr-4 font-semibold text-gray-200">{t.ticker}</td>
@@ -296,17 +330,64 @@ export default function BacktestTrades() {
                   <td className="py-1.5 pr-4 font-mono text-gray-300">{t.price?.toLocaleString()}</td>
                   <td className="py-1.5 pr-4 font-mono text-gray-300">{fmtVnd(t.value)}</td>
                   <td className="py-1.5 pr-4 font-mono text-gray-400">{fmtVnd(t.fee)}</td>
-                  <td className="py-1.5 pr-4">
-                    {t.regime && <span className={t.regime === 'BULL' ? 'tag-bull' : 'tag-bear'}>{t.regime}</span>}
-                  </td>
-                  <td className="py-1.5 font-mono text-gray-400">{t.forecast != null ? (t.forecast > 0 ? '+' : '') + t.forecast.toFixed(1) : '—'}</td>
+                  {isSwing ? (
+                    <>
+                      <td className="py-1.5 pr-4">
+                        {t.reason && <span className="text-xs bg-primary/15 text-primary px-1.5 py-0.5 rounded">{t.reason}</span>}
+                      </td>
+                      <td className={`py-1.5 font-mono font-semibold ${
+                        (t.r_multiple ?? 0) > 0 ? 'text-success' : (t.r_multiple ?? 0) < 0 ? 'text-danger' : 'text-gray-400'
+                      }`}>
+                        {t.r_multiple != null ? `${t.r_multiple > 0 ? '+' : ''}${t.r_multiple.toFixed(1)}R` : '—'}
+                      </td>
+                    </>
+                  ) : (
+                    <>
+                      <td className="py-1.5 pr-4">
+                        {t.regime && <span className={t.regime === 'BULL' ? 'tag-bull' : 'tag-bear'}>{t.regime}</span>}
+                      </td>
+                      <td className="py-1.5 font-mono text-gray-400">{t.forecast != null ? (t.forecast > 0 ? '+' : '') + t.forecast.toFixed(1) : '—'}</td>
+                    </>
+                  )}
                 </tr>
               ))}
             </tbody>
           </table>
-          {filteredTrades.length > 200 && (
-            <p className="text-xs text-gray-500 mt-2 text-center">Showing 200 of {filteredTrades.length} trades</p>
-          )}
+        </div>
+        {/* Pagination controls */}
+        <div className="flex items-center justify-between mt-3 pt-3 border-t border-border/40">
+          <p className="text-xs text-gray-500">
+            {sortedTrades.length} trades · page {safePage} of {totalPages}
+          </p>
+          <div className="flex items-center gap-1">
+            <button className="px-2.5 py-1 text-sm rounded bg-card text-gray-400 hover:text-gray-200 disabled:opacity-30"
+              disabled={safePage <= 1} onClick={() => setPage(1)}>
+              ««
+            </button>
+            <button className="px-2.5 py-1 text-sm rounded bg-card text-gray-400 hover:text-gray-200 disabled:opacity-30"
+              disabled={safePage <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}>
+              «
+            </button>
+            {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+              const start = Math.max(1, Math.min(safePage - 2, totalPages - 4))
+              const p = start + i
+              if (p > totalPages) return null
+              return (
+                <button key={p} onClick={() => setPage(p)}
+                  className={`px-2.5 py-1 text-sm rounded ${p === safePage ? 'bg-primary/20 text-primary' : 'bg-card text-gray-400 hover:text-gray-200'}`}>
+                  {p}
+                </button>
+              )
+            })}
+            <button className="px-2.5 py-1 text-sm rounded bg-card text-gray-400 hover:text-gray-200 disabled:opacity-30"
+              disabled={safePage >= totalPages} onClick={() => setPage(p => Math.min(totalPages, p + 1))}>
+              »
+            </button>
+            <button className="px-2.5 py-1 text-sm rounded bg-card text-gray-400 hover:text-gray-200 disabled:opacity-30"
+              disabled={safePage >= totalPages} onClick={() => setPage(totalPages)}>
+              »»
+            </button>
+          </div>
         </div>
       </div>
     </div>

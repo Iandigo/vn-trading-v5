@@ -32,6 +32,7 @@ def run_backtest(
     capital: float = 500_000_000,
     use_real: bool = False,
     verbose: bool = True,
+    strategy: str = "carver",
 ):
     universe = UNIVERSE[:n_stocks]
     end_date = datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -70,19 +71,29 @@ def run_backtest(
         return None
 
     # ── Run backtest ──────────────────────────────────────────────────────────
-    from backtesting.engine import BacktestEngine
+    if strategy == "martin_luk":
+        from strategies.martin_luk import MartinLukEngine
+        engine = MartinLukEngine(capital=capital)
+        results = engine.run(
+            close_matrix=close_matrix,
+            ohlcv_dict=ohlcv_dict,
+            index_prices=index_prices,
+            verbose=verbose,
+        )
+    else:
+        from backtesting.engine import BacktestEngine
+        engine = BacktestEngine(capital=capital)
+        results = engine.run(
+            close_matrix=close_matrix,
+            ohlcv_dict=ohlcv_dict,
+            index_prices=index_prices,
+            verbose=verbose,
+        )
+
     from backtesting.metrics import print_scorecard
-
-    engine = BacktestEngine(capital=capital)
-    results = engine.run(
-        close_matrix=close_matrix,
-        ohlcv_dict=ohlcv_dict,
-        index_prices=index_prices,
-        verbose=verbose,
-    )
-
     if verbose:
-        print_scorecard(results["metrics"], title=f"VN Trading v5 — {years}y Backtest")
+        title = f"Martin Luk Swing — {years}y" if strategy == "martin_luk" else f"VN Trading v5 — {years}y Backtest"
+        print_scorecard(results["metrics"], title=title)
 
     # ── Save outputs ──────────────────────────────────────────────────────────
     os.makedirs("outputs", exist_ok=True)
@@ -129,6 +140,7 @@ def run_backtest(
             "years":       years,
             "capital":     capital,
             "data_source": "real" if use_real else "mock",
+            "strategy":    strategy,
         },
         "metrics":    metrics_serialisable,
         "equity_file": eq_file     if not eq.empty     else None,
@@ -211,6 +223,9 @@ if __name__ == "__main__":
     parser.add_argument("--years", type=int, default=3)
     parser.add_argument("--n", type=int, default=15)
     parser.add_argument("--capital", type=float, default=500_000_000)
+    parser.add_argument("--strategy", type=str, default="carver",
+                        choices=["carver", "martin_luk"],
+                        help="Trading strategy: carver or martin_luk")
     args = parser.parse_args()
 
     run_backtest(
@@ -218,4 +233,5 @@ if __name__ == "__main__":
         years=args.years,
         capital=args.capital,
         use_real=args.real,
+        strategy=args.strategy,
     )

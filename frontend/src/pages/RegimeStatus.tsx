@@ -19,7 +19,8 @@ export default function RegimeStatus() {
   const { data: regime, isLoading, error, refetch } = useQuery({
     queryKey: ['regime'],
     queryFn: fetchRegime,
-    staleTime: 60_000,    // Cache for 1 minute — live data is slow to fetch
+    staleTime: 5 * 60_000,   // 5 min — no need to refetch on every page visit
+    gcTime:   30 * 60_000,   // 30 min — keep cached data in memory across navigations
     retry: 1,
   })
 

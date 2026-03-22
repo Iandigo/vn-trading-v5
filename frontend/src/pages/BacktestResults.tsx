@@ -15,21 +15,9 @@ import {
 import { fetchHistory, fetchEquity, fetchMetrics } from '../api/client'
 import MetricCard from '../components/MetricCard'
 import type { BacktestRun, Metrics } from '../types'
+import { fmtPct, fmtNum, fmtVnd } from '../utils/format'
 
-const fmtPct = (v: number | undefined, decimals = 1) =>
-  v == null ? '—' : `${(v * 100).toFixed(decimals)}%`
-
-const fmtNum = (v: number | undefined, decimals = 2) =>
-  v == null ? '—' : v.toFixed(decimals)
-
-const fmtVnd = (v: number | undefined) => {
-  if (v == null) return '—'
-  if (Math.abs(v) >= 1e9) return `${(v / 1e9).toFixed(1)}B`
-  if (Math.abs(v) >= 1e6) return `${(v / 1e6).toFixed(1)}M`
-  return v.toLocaleString()
-}
-
-const SCORECARD: Array<{
+const CARVER_SCORECARD: Array<{
   key: keyof Metrics
   label: string
   format: (v: number) => string
@@ -40,9 +28,26 @@ const SCORECARD: Array<{
   { key: 'sharpe',          label: 'Sharpe Ratio',  format: v => fmtNum(v), pass: v => v >= 0.40,  target: '> 0.40' },
   { key: 'sortino',         label: 'Sortino',       format: v => fmtNum(v), pass: v => v >= 0.50,  target: '> 0.50' },
   { key: 'max_drawdown',    label: 'Max Drawdown',  format: v => fmtPct(v), pass: v => v > -0.30,  target: '> -30%' },
-  { key: 'annual_vol',      label: 'Annual Vol',    format: v => fmtPct(v), pass: v => v >= 0.10 && v <= 0.25, target: '10–25%' },
+  { key: 'annual_vol',      label: 'Annual Vol',    format: v => fmtPct(v), pass: v => v >= 0.10 && v <= 0.25, target: '10-25%' },
   { key: 'win_rate',        label: 'Win Rate',      format: v => fmtPct(v), pass: v => v >= 0.45,  target: '> 45%' },
   { key: 'cost_drag_annual',label: 'Cost Drag/yr',  format: v => fmtPct(v), pass: v => v < 0.015,  target: '< 1.5%' },
+]
+
+const SWING_SCORECARD: Array<{
+  key: keyof Metrics
+  label: string
+  format: (v: number) => string
+  pass: (v: number) => boolean
+  target: string
+}> = [
+  { key: 'cagr',                  label: 'CAGR',             format: v => fmtPct(v),               pass: v => v >= 0.045,  target: '> 4.5%' },
+  { key: 'sharpe',                label: 'Sharpe Ratio',     format: v => fmtNum(v),               pass: v => v >= 0.40,   target: '> 0.40' },
+  { key: 'expectancy',            label: 'Expectancy',       format: v => `${fmtNum(v)}R`,         pass: v => v > 0.5,     target: '> 0.5R' },
+  { key: 'max_drawdown',          label: 'Max Drawdown',     format: v => fmtPct(v),               pass: v => v > -0.30,   target: '> -30%' },
+  { key: 'avg_winner_r',          label: 'Avg Winner',       format: v => `${fmtNum(v, 1)}R`,      pass: v => v >= 3.0,    target: '> 3.0R' },
+  { key: 'avg_loser_r',           label: 'Avg Loser',        format: v => `${fmtNum(v, 1)}R`,      pass: v => v > -1.5,    target: '> -1.5R' },
+  { key: 'win_rate',              label: 'Win Rate',         format: v => fmtPct(v),               pass: v => v >= 0.20,   target: '> 20%' },
+  { key: 'cost_drag_annual',      label: 'Cost Drag/yr',     format: v => fmtPct(v),               pass: v => v < 0.02,    target: '< 2%' },
 ]
 
 export default function BacktestResults() {
@@ -85,8 +90,11 @@ export default function BacktestResults() {
   })()
 
   const selectedRun = runs.find(r => r.run_id === runId)
+  const strategyLabel = (s?: string) => s === 'martin_luk' ? 'Luk' : 'Carver'
   const runLabel = (r: BacktestRun) =>
-    `${r.timestamp}  —  ${r.params.n_stocks} stocks  ${r.params.years}y  [${r.params.data_source}]`
+    `${r.timestamp}  —  ${strategyLabel(r.params.strategy)}  ${r.params.n_stocks} stocks  ${r.params.years}y  [${r.params.data_source}]`
+
+  const isSwing = selectedRun?.params?.strategy === 'martin_luk' || metrics?.strategy === 'martin_luk'
 
   if (!metrics && !metricsLoading && runs.length === 0) {
     return (
@@ -131,27 +139,52 @@ export default function BacktestResults() {
       {metrics && (
         <>
           {/* Top metrics */}
-          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
-            <MetricCard label="CAGR" value={fmtPct(metrics.cagr)}
-              highlight={metrics.cagr >= 0.045 ? 'green' : 'red'} sub="target > 4.5%" />
-            <MetricCard label="Sharpe" value={fmtNum(metrics.sharpe)}
-              highlight={metrics.sharpe >= 0.40 ? 'green' : 'red'} sub="target > 0.40" />
-            <MetricCard label="Sortino" value={fmtNum(metrics.sortino)}
-              highlight={metrics.sortino >= 0.50 ? 'green' : 'red'} sub="target > 0.50" />
-            <MetricCard label="Max Drawdown" value={fmtPct(metrics.max_drawdown)}
-              highlight={metrics.max_drawdown > -0.30 ? 'green' : 'red'} sub="target > -30%" />
-            <MetricCard label="Trades/month" value={String(metrics.trades_per_month ?? '—')}
-              highlight={(metrics.trades_per_month ?? 99) < 30 ? 'green' : 'red'} sub="target < 30" />
-            <MetricCard label="Cost Drag/yr" value={fmtPct(metrics.cost_drag_annual)}
-              highlight={(metrics.cost_drag_annual ?? 1) < 0.015 ? 'green' : 'red'} sub="target < 1.5%" />
-          </div>
+          {isSwing ? (
+            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-7 gap-3">
+              <MetricCard label="CAGR" value={fmtPct(metrics.cagr)}
+                highlight={metrics.cagr >= 0.045 ? 'green' : 'red'} sub="target > 4.5%" />
+              <MetricCard label="Sharpe" value={fmtNum(metrics.sharpe)}
+                highlight={metrics.sharpe >= 0.40 ? 'green' : 'red'} sub="target > 0.40" />
+              <MetricCard label="Expectancy" value={`${fmtNum(metrics.expectancy)}R`}
+                highlight={(metrics.expectancy ?? 0) > 0.5 ? 'green' : 'red'} sub="target > 0.5R" />
+              <MetricCard label="Max Drawdown" value={fmtPct(metrics.max_drawdown)}
+                highlight={metrics.max_drawdown > -0.30 ? 'green' : 'red'} sub="target > -30%" />
+              <MetricCard label="Avg Winner" value={`${fmtNum(metrics.avg_winner_r, 1)}R`}
+                highlight={(metrics.avg_winner_r ?? 0) >= 3.0 ? 'green' : 'red'} sub="target > 3.0R" />
+              <MetricCard label="Avg Loser" value={`${fmtNum(metrics.avg_loser_r, 1)}R`}
+                highlight={(metrics.avg_loser_r ?? -5) > -1.5 ? 'green' : 'red'} sub="target > -1.5R" />
+              <MetricCard label="Win Rate" value={fmtPct(metrics.win_rate)}
+                highlight={metrics.win_rate >= 0.20 ? 'green' : 'red'} sub="target > 20%" />
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+              <MetricCard label="CAGR" value={fmtPct(metrics.cagr)}
+                highlight={metrics.cagr >= 0.045 ? 'green' : 'red'} sub="target > 4.5%" />
+              <MetricCard label="Sharpe" value={fmtNum(metrics.sharpe)}
+                highlight={metrics.sharpe >= 0.40 ? 'green' : 'red'} sub="target > 0.40" />
+              <MetricCard label="Sortino" value={fmtNum(metrics.sortino)}
+                highlight={metrics.sortino >= 0.50 ? 'green' : 'red'} sub="target > 0.50" />
+              <MetricCard label="Max Drawdown" value={fmtPct(metrics.max_drawdown)}
+                highlight={metrics.max_drawdown > -0.30 ? 'green' : 'red'} sub="target > -30%" />
+              <MetricCard label="Trades/month" value={String(metrics.trades_per_month ?? '—')}
+                highlight={(metrics.trades_per_month ?? 99) < 30 ? 'green' : 'red'} sub="target < 30" />
+              <MetricCard label="Cost Drag/yr" value={fmtPct(metrics.cost_drag_annual)}
+                highlight={(metrics.cost_drag_annual ?? 1) < 0.015 ? 'green' : 'red'} sub="target < 1.5%" />
+            </div>
+          )}
 
           {/* Secondary metrics */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <MetricCard label="Total Return" value={fmtPct(metrics.total_return)} small />
             <MetricCard label="Annual Vol" value={fmtPct(metrics.annual_vol)} small />
             <MetricCard label="Total Fees" value={fmtVnd(metrics.total_fees_vnd)} small />
-            <MetricCard label="% Bull Regime" value={fmtPct(metrics.regime_pct_bull)} small />
+            {isSwing ? (
+              <>
+                <MetricCard label="Avg Hold Days" value={String(metrics.avg_holding_days?.toFixed(0) ?? '—')} small />
+              </>
+            ) : (
+              <MetricCard label="% Bull Regime" value={fmtPct(metrics.regime_pct_bull)} small />
+            )}
           </div>
         </>
       )}
@@ -209,10 +242,12 @@ export default function BacktestResults() {
         </div>
       )}
 
-      {/* Carver scorecard */}
+      {/* Strategy scorecard */}
       {metrics && (
         <div className="card">
-          <h2 className="text-lg font-semibold mb-4 text-gray-200">Carver Scorecard</h2>
+          <h2 className="text-lg font-semibold mb-4 text-gray-200">
+            {isSwing ? 'Martin Luk Swing Scorecard' : 'Carver Scorecard'}
+          </h2>
           <table className="w-full text-sm">
             <thead>
               <tr className="text-gray-500 text-xs uppercase border-b border-border">
@@ -223,7 +258,7 @@ export default function BacktestResults() {
               </tr>
             </thead>
             <tbody>
-              {SCORECARD.map(row => {
+              {(isSwing ? SWING_SCORECARD : CARVER_SCORECARD).map(row => {
                 const val = metrics[row.key] as number
                 const passed = val != null && row.pass(val)
                 return (

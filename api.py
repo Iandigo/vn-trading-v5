@@ -61,6 +61,7 @@ class BacktestParams(BaseModel):
     years: int = 3
     capital: float = 500_000_000
     use_real: bool = False
+    strategy: str = "carver"  # "carver" or "martin_luk"
     config_overrides: Optional[Dict[str, Any]] = None
 
 
@@ -70,6 +71,7 @@ class PermutationParams(BaseModel):
     n_stocks: int = 10
     use_real: bool = False
     metric: str = "sharpe"
+    strategy: str = "carver"
 
 
 # ─── Config helpers ───────────────────────────────────────────────────────────
@@ -175,6 +177,7 @@ def _execute_backtest(job_id: str, params: BacktestParams):
                 capital=params.capital,
                 use_real=params.use_real,
                 verbose=False,
+                strategy=params.strategy,
             )
 
             _jobs[job_id]["progress"] = 95
@@ -245,6 +248,7 @@ def _execute_permutation(job_id: str, params: PermutationParams):
                 capital=500_000_000,
                 use_real=params.use_real,
                 metric=params.metric,
+                strategy=params.strategy,
                 verbose=False,
                 progress_callback=_progress_cb,
             )
@@ -546,9 +550,276 @@ def get_portfolio():
     return {
         "holdings": holdings,
         "open_positions": len(holdings),
-        "trades": trades[-50:],
-        "available": bool(holdings),
+        "trades": trades[-100:],
+        "available": bool(holdings) or bool(trades),
     }
+
+
+# ─── Trade recording ────────────────────────────────────────────────────────
+
+class TradeRecord(BaseModel):
+    ticker: str
+    action: str  # BUY or SELL
+    shares: int
+    price: float
+    stop_price: Optional[float] = None
+    r_value: Optional[float] = None
+    pattern: Optional[str] = None
+    strategy: str = "martin_luk"
+    note: Optional[str] = None
+
+
+@app.post("/api/portfolio/trade")
+def record_trade(trade: TradeRecord):
+    """Record a live trade and update holdings."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    fee = round(trade.shares * trade.price * 0.0025, 0)
+
+    entry = {
+        "date": now,
+        "ticker": trade.ticker,
+        "action": trade.action.upper(),
+        "shares": trade.shares,
+        "price": trade.price,
+        "value": round(trade.shares * trade.price, 0),
+        "fee": fee,
+        "strategy": trade.strategy,
+    }
+    if trade.stop_price is not None:
+        entry["stop_price"] = trade.stop_price
+    if trade.r_value is not None:
+        entry["r_value"] = trade.r_value
+    if trade.pattern:
+        entry["pattern"] = trade.pattern
+    if trade.note:
+        entry["note"] = trade.note
+
+    # Append to trade log
+    log_path = OUTPUTS_DIR / "live_trade_log.json"
+    trades: List = []
+    if log_path.exists():
+        try:
+            trades = json.loads(log_path.read_text())
+        except Exception:
+            trades = []
+    trades.append(entry)
+    log_path.write_text(json.dumps(trades, indent=2))
+
+    # Update holdings
+    holdings_path = OUTPUTS_DIR / "holdings.json"
+    holdings: Dict = {}
+    if holdings_path.exists():
+        try:
+            holdings = json.loads(holdings_path.read_text())
+        except Exception:
+            holdings = {}
+
+    ticker = trade.ticker
+    if trade.action.upper() == "BUY":
+        current = holdings.get(ticker, {"shares": 0, "avg_price": 0})
+        if isinstance(current, (int, float)):
+            current = {"shares": int(current), "avg_price": 0}
+        old_shares = current.get("shares", 0)
+        old_avg = current.get("avg_price", 0)
+        new_shares = old_shares + trade.shares
+        new_avg = ((old_avg * old_shares) + (trade.price * trade.shares)) / max(new_shares, 1)
+        holdings[ticker] = {
+            "shares": new_shares,
+            "avg_price": round(new_avg, 0),
+            "stop_price": trade.stop_price,
+            "r_value": trade.r_value,
+            "pattern": trade.pattern,
+            "strategy": trade.strategy,
+            "entry_date": now,
+        }
+    elif trade.action.upper() == "SELL":
+        current = holdings.get(ticker, {"shares": 0})
+        if isinstance(current, (int, float)):
+            current = {"shares": int(current)}
+        remaining = current.get("shares", 0) - trade.shares
+        if remaining <= 0:
+            holdings.pop(ticker, None)
+        else:
+            current["shares"] = remaining
+            holdings[ticker] = current
+
+    holdings_path.write_text(json.dumps(holdings, indent=2))
+
+    return {"recorded": True, "trade": entry, "holdings_count": len(holdings)}
+
+
+@app.delete("/api/portfolio/trade/{index}")
+def delete_trade(index: int):
+    """Delete a trade by index from the log."""
+    log_path = OUTPUTS_DIR / "live_trade_log.json"
+    if not log_path.exists():
+        raise HTTPException(404, "No trade log")
+    trades = json.loads(log_path.read_text())
+    if index < 0 or index >= len(trades):
+        raise HTTPException(404, "Trade index out of range")
+    removed = trades.pop(index)
+    log_path.write_text(json.dumps(trades, indent=2))
+    return {"deleted": removed}
+
+
+@app.delete("/api/portfolio/holding/{ticker}")
+def delete_holding(ticker: str):
+    """Delete a holding (position) by ticker."""
+    holdings_path = OUTPUTS_DIR / "holdings.json"
+    if not holdings_path.exists():
+        raise HTTPException(404, "No holdings file")
+    holdings = json.loads(holdings_path.read_text())
+    # Try exact match first, then with .VN suffix
+    key = ticker if ticker in holdings else f"{ticker}.VN" if f"{ticker}.VN" in holdings else None
+    if key is None:
+        raise HTTPException(404, f"Holding not found: {ticker}")
+    removed = holdings.pop(key)
+    holdings_path.write_text(json.dumps(holdings, indent=2))
+    return {"deleted_ticker": key, "deleted": removed}
+
+
+# ─── Scanner (live signal detection) ─────────────────────────────────────────
+
+_scanner_lock = threading.Lock()
+
+
+@app.get("/api/scanner")
+def get_scanner(n_stocks: int = 30, equity: float = 500_000_000):
+    """
+    Run the Martin Luk EMA scanner + breakout detector on recent data.
+    Returns current classification, ADR, breakout signals, and position sizing.
+    """
+    with _scanner_lock:
+        try:
+            from signals.ema_scanner import scan_single_stock
+            from signals.breakout_detector import detect_breakouts
+            from signals.market_health import compute_market_health
+            from sizing.fixed_risk import compute_position_size
+            from config import MARTIN_LUK
+
+            universe = VN30_FULL[:n_stocks]
+            end = datetime.today()
+            start = end - timedelta(days=120)  # ~60 trading days for EMA(50) warmup
+
+            # Fetch data (uses cache when available)
+            from data.fetcher import fetch_multi
+            ohlcv_dict = fetch_multi(universe, start, end, verbose=False)
+
+            if not ohlcv_dict:
+                return {"available": False, "error": "No data available. Check internet connection."}
+
+            # Scan each stock
+            ema_scans = {}
+            stock_rows = []
+
+            for ticker in universe:
+                if ticker not in ohlcv_dict or ohlcv_dict[ticker].empty:
+                    stock_rows.append({
+                        "ticker": ticker,
+                        "classification": "NO_DATA",
+                        "adr": None,
+                        "ema_9": None, "ema_21": None, "ema_50": None,
+                        "close": None,
+                        "breakout": None,
+                    })
+                    continue
+
+                ohlcv = ohlcv_dict[ticker]
+                scan = scan_single_stock(ohlcv)
+                ema_scans[ticker] = scan
+
+                if scan.empty:
+                    continue
+
+                last = scan.iloc[-1]
+                last_ohlcv = ohlcv.iloc[-1]
+                classification = str(last.get("classification", "LAGGARD"))
+                adr = float(last.get("adr", 0)) if not pd.isna(last.get("adr", 0)) else 0
+                ema_9 = float(last.get("ema_9", 0))
+                ema_21 = float(last.get("ema_21", 0))
+                ema_50 = float(last.get("ema_50", 0))
+                close = float(last_ohlcv.get("close", 0))
+
+                # Check for breakout signal on latest bar
+                idx = len(ohlcv) - 1
+                breakout = detect_breakouts(ohlcv, idx, scan, classification, adr, MARTIN_LUK)
+
+                row: Dict[str, Any] = {
+                    "ticker": ticker,
+                    "classification": classification,
+                    "adr": round(adr * 100, 2),  # as percentage
+                    "ema_9": round(ema_9, 0),
+                    "ema_21": round(ema_21, 0),
+                    "ema_50": round(ema_50, 0),
+                    "close": round(close, 0),
+                    "breakout": None,
+                }
+
+                if breakout.get("triggered"):
+                    entry = breakout["entry_price"]
+                    stop = breakout["stop_price"]
+                    r_val = breakout["r_value"]
+
+                    # Compute recommended position size
+                    sizing = compute_position_size(
+                        equity=equity,
+                        entry_price=entry,
+                        stop_price=stop,
+                        risk_pct=MARTIN_LUK["risk_per_trade_pct"],
+                        lot_size=MARTIN_LUK["lot_size"],
+                        max_position_pct=MARTIN_LUK["max_position_pct"],
+                    )
+
+                    row["breakout"] = {
+                        "pattern": breakout["pattern"],
+                        "entry_price": round(entry, 0),
+                        "stop_price": round(stop, 0),
+                        "r_value": round(r_val, 0),
+                        "target_3r": round(entry + 3 * r_val, 0),
+                        "target_5r": round(entry + 5 * r_val, 0),
+                        "shares": sizing["shares"],
+                        "position_value": round(sizing["position_value"], 0),
+                        "risk_amount": round(sizing["risk_amount"], 0),
+                    }
+
+                stock_rows.append(row)
+
+            # Market health
+            latest_date = None
+            for scan_df in ema_scans.values():
+                if not scan_df.empty:
+                    d = scan_df.index[-1]
+                    if latest_date is None or d > latest_date:
+                        latest_date = d
+
+            health = {"health": "UNKNOWN", "leader_count": 0, "total_stocks": 0, "leader_pct": 0, "risk_multiplier": 0}
+            if latest_date is not None:
+                health = compute_market_health(ema_scans, latest_date, MARTIN_LUK)
+
+            # Summary counts
+            lead_count = sum(1 for s in stock_rows if s["classification"] == "LEAD")
+            weakening_count = sum(1 for s in stock_rows if s["classification"] == "WEAKENING")
+            laggard_count = sum(1 for s in stock_rows if s["classification"] == "LAGGARD")
+            signal_count = sum(1 for s in stock_rows if s["breakout"] is not None)
+
+            return {
+                "available": True,
+                "scan_date": str(latest_date.date()) if latest_date else None,
+                "stocks": stock_rows,
+                "market_health": health,
+                "summary": {
+                    "lead": lead_count,
+                    "weakening": weakening_count,
+                    "laggard": laggard_count,
+                    "signals": signal_count,
+                    "total": len(stock_rows),
+                },
+                "equity": equity,
+            }
+
+        except Exception as e:
+            traceback.print_exc()
+            return {"available": False, "error": str(e)}
 
 
 # ─── Serve built frontend (production) ────────────────────────────────────────

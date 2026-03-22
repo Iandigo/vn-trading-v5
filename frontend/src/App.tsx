@@ -7,14 +7,16 @@ import BacktestHistory from './pages/BacktestHistory'
 import PermutationTest from './pages/PermutationTest'
 import RegimeStatus from './pages/RegimeStatus'
 import LivePortfolio from './pages/LivePortfolio'
+import Scanner from './pages/Scanner'
 import Config from './pages/Config'
 import RunBacktest from './pages/RunBacktest'
 
 export default function App() {
-  const [page, setPage] = useState<Page>('results')
+  const [page, setPage] = useState<Page>('scanner')
 
   const renderPage = () => {
     switch (page) {
+      case 'scanner':     return <Scanner onTrade={() => setPage('portfolio')} />
       case 'results':     return <BacktestResults />
       case 'trades':      return <BacktestTrades />
       case 'history':     return <BacktestHistory />
@@ -23,7 +25,7 @@ export default function App() {
       case 'portfolio':   return <LivePortfolio />
       case 'config':      return <Config />
       case 'run':         return <RunBacktest onDone={() => setPage('results')} />
-      default:            return <BacktestResults />
+      default:            return <Scanner onTrade={() => setPage('portfolio')} />
     }
   }
 
