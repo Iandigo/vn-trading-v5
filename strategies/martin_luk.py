@@ -145,10 +145,12 @@ class MartinLukEngine:
             current_prices = prices.loc[date]
 
             # ── Mark-to-market ──────────────────────────────────────────────
-            positions_value = sum(
-                pos.shares_remaining * float(current_prices.get(pos.ticker, 0))
-                for pos in self.positions.values()
-            )
+            positions_value = 0.0
+            for pos in self.positions.values():
+                px = current_prices.get(pos.ticker, 0)
+                if pd.isna(px):
+                    px = pos.entry_price  # fallback: use entry price if data missing
+                positions_value += pos.shares_remaining * float(px)
             total_equity = self.capital + positions_value
             self.peak_equity = max(self.peak_equity, total_equity)
 
@@ -160,11 +162,14 @@ class MartinLukEngine:
             # ── Process pending sells (T+2.5 queue) ─────────────────────────
             still_pending = []
             for ps in pending_sells:
+                # Skip if position was already fully closed (e.g. stop hit after partial queued)
+                if ps["ticker"] not in self.positions and ps["reason"].startswith("partial"):
+                    continue
                 days_held = (date - ps["entry_date"]).days
                 if days_held >= settlement_days:
                     self._execute_sell(
                         ps["ticker"], ps["shares"], current_prices,
-                        date, ps["reason"], cost_pct,
+                        date, ps["reason"], cost_pct, ps.get("sell_price"),
                     )
                 else:
                     still_pending.append(ps)
@@ -200,16 +205,16 @@ class MartinLukEngine:
                                 ticker, sell_shares, current_prices,
                                 date, "partial_3R", cost_pct,
                             )
-                            pos.shares_remaining -= sell_shares
-                            pos.partial_count = 1
-                            pos.trailing_stop = pos.entry_price  # Move to breakeven
                         else:
                             pending_sells.append({
                                 "ticker": ticker, "shares": sell_shares,
                                 "entry_date": pos.entry_date, "reason": "partial_3R",
+                                "sell_price": price,  # lock price at decision time
                             })
-                            pos.partial_count = 1
-                            pos.trailing_stop = pos.entry_price
+                        # Always decrement immediately to prevent double-selling
+                        pos.shares_remaining -= sell_shares
+                        pos.partial_count = 1
+                        pos.trailing_stop = pos.entry_price  # Move to breakeven
 
                 # --- Partial exit at 5R ---
                 elif pos.partial_count == 1 and current_r >= cfg["partial_2_r"]:
@@ -221,16 +226,17 @@ class MartinLukEngine:
                                 ticker, sell_shares, current_prices,
                                 date, "partial_5R", cost_pct,
                             )
-                            pos.shares_remaining -= sell_shares
-                            pos.partial_count = 2
-                            if ema_9_val is not None and not np.isnan(ema_9_val):
-                                pos.trailing_stop = ema_9_val
                         else:
                             pending_sells.append({
                                 "ticker": ticker, "shares": sell_shares,
                                 "entry_date": pos.entry_date, "reason": "partial_5R",
+                                "sell_price": price,  # lock price at decision time
                             })
-                            pos.partial_count = 2
+                        # Always decrement immediately to prevent double-selling
+                        pos.shares_remaining -= sell_shares
+                        pos.partial_count = 2
+                        if ema_9_val is not None and not np.isnan(ema_9_val):
+                            pos.trailing_stop = ema_9_val
 
                 # --- Update trailing stop ---
                 if pos.partial_count >= 2 and ema_9_val is not None and not np.isnan(ema_9_val):
@@ -244,13 +250,13 @@ class MartinLukEngine:
                             ticker, pos.shares_remaining, current_prices,
                             date, reason, cost_pct,
                         )
-                        tickers_to_remove.append(ticker)
                     else:
                         pending_sells.append({
                             "ticker": ticker, "shares": pos.shares_remaining,
                             "entry_date": pos.entry_date, "reason": reason,
+                            "sell_price": price,
                         })
-                        tickers_to_remove.append(ticker)
+                    tickers_to_remove.append(ticker)
                     continue
 
                 # --- EMA(21) full exit (after partials taken) ---
@@ -261,13 +267,13 @@ class MartinLukEngine:
                                 ticker, pos.shares_remaining, current_prices,
                                 date, "ema_exit", cost_pct,
                             )
-                            tickers_to_remove.append(ticker)
                         else:
                             pending_sells.append({
                                 "ticker": ticker, "shares": pos.shares_remaining,
                                 "entry_date": pos.entry_date, "reason": "ema_exit",
+                                "sell_price": price,
                             })
-                            tickers_to_remove.append(ticker)
+                        tickers_to_remove.append(ticker)
                         continue
 
                 # --- Clean up fully sold positions ---
@@ -389,10 +395,12 @@ class MartinLukEngine:
 
             # ── Record equity ───────────────────────────────────────────────
             # Recompute after trades
-            positions_value = sum(
-                pos.shares_remaining * float(current_prices.get(pos.ticker, 0))
-                for pos in self.positions.values()
-            )
+            positions_value = 0.0
+            for pos in self.positions.values():
+                px = current_prices.get(pos.ticker, 0)
+                if pd.isna(px):
+                    px = pos.entry_price
+                positions_value += pos.shares_remaining * float(px)
             total_equity = self.capital + positions_value
 
             self.equity_curve.append({
@@ -443,9 +451,9 @@ class MartinLukEngine:
         }
 
     def _execute_sell(self, ticker: str, shares: int, current_prices: pd.Series,
-                      date, reason: str, cost_pct: float):
-        """Execute a sell order and log it."""
-        price = float(current_prices.get(ticker, 0))
+                      date, reason: str, cost_pct: float, locked_price: float = None):
+        """Execute a sell order and log it. Uses locked_price if provided (pending sells)."""
+        price = locked_price if locked_price else float(current_prices.get(ticker, 0))
         if price <= 0 or shares <= 0:
             return
 

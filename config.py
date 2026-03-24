@@ -68,6 +68,7 @@ MA_REGIME = {
     "bull_tau_multiplier": 1.0,  # Full position sizing in bull market
     "bear_tau_multiplier": 0.5,  # Half sizing in bear market (regime = BEAR)
     "bear_new_entries": False,   # No new long entries when in BEAR regime
+    "bear_top_n_entries": 3,     # Exception: allow top-N momentum stocks to enter in BEAR
 }
 
 # --- Signal 2: Cross-Sectional Momentum ---
@@ -80,8 +81,8 @@ CROSS_MOMENTUM = {
     "skip_recent_days": 5,     # Skip most recent week (short-term reversal bias)
     "rebalance_every_days": 21, # Monthly — keeps cost drag low
     "min_stocks_for_signal": 5, # Need at least this many stocks to rank
-    "top_pct": 0.40,           # Top 40% of universe gets positive forecast
-    "bottom_pct": 0.40,        # Bottom 40% gets negative forecast
+    "top_pct": 0.3,           # Top 40% of universe gets positive forecast
+    "bottom_pct": 0.3,        # Bottom 40% gets negative forecast
     # Middle 20% → 0 forecast (no signal, not penalised)
 }
 
@@ -104,8 +105,8 @@ IBS = {
 # between signals. Since IBS is counter-trend (corr ~ -0.3 with momentum),
 # combined signal is diversified → FDM > 1.0 is justified.
 SIGNAL_WEIGHTS = {
-    "cross_momentum": 0.55,   # Primary driver — works well in VN frontier market
-    "ibs": 0.15,              # Counter-trend, low weight, BULL regime only
+    "cross_momentum": 0.85,   # Primary driver — works well in VN frontier market
+    "ibs": 0.1,              # Counter-trend, low weight, BULL regime only
     # Note: MA regime is a FILTER not a signal — it has no weight here.
     # It modifies tau and blocks new entries, it doesn't produce a forecast.
     # Total = 0.70. Remaining 0.30 = cash/no-signal exposure. FDM compensates.
@@ -122,13 +123,13 @@ SIZING = {
     # WHY 0.25? VN stocks have high correlation (~0.6 vs ~0.35 in developed mkts).
     # IDM overestimates diversification benefit, so realised vol < target.
     # Raising tau from 0.20 to 0.25 corrects this systematic undersizing.
-    "target_vol": 0.25,
+    "target_vol": 0.3,
 
     # Buffer zone: only trade when position drifts OUTSIDE this band.
     # WHY 0.40? Combined with "trade to edge" rule (Carver method), this keeps
     # positions inside the band much longer. VN illiquid market needs wide buffer.
     # At 0.20 with trade-to-optimal: 64 trades/month. At 0.40 with trade-to-edge: ~15.
-    "buffer_fraction": 0.40,
+    "buffer_fraction": 0.45,
 
     # VN lot size: HOSE requires multiples of 100 shares
     "lot_size": 100,
@@ -145,7 +146,7 @@ SIZING = {
     # Volatility lookback for position sizing.
     # WHY 60? 20-day was too noisy → sizes changed daily → excess trading.
     # 60 days (~3 months) smooths out short-term spikes while still adapting.
-    "vol_lookback": 60,
+    "vol_lookback": 90,
 
     # Warmup bars before simulation begins (must be >= MA period)
     "min_warmup": 210,

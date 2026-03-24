@@ -2,14 +2,14 @@
 backtesting/metrics.py — Performance Metrics
 =============================================
 Standard Carver scorecard: CAGR, Sharpe, Sortino, Max Drawdown.
-Risk-free rate set to Vietnam bank FD rate (~5% annual).
+Risk-free rate set to Vietnam bank FD rate (~3% annual, 2025-2026).
 """
 
 import numpy as np
 import pandas as pd
 
 
-RISK_FREE_RATE = 0.05   # Vietnam 12-month FD rate ~5%
+RISK_FREE_RATE = 0.03   # Vietnam 12-month FD rate ~3% (2025-2026, down from ~5% in 2023)
 
 
 def compute_metrics(equity_curve: pd.Series) -> dict:

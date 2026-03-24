@@ -33,6 +33,31 @@ import pandas as pd
 from config import UNIVERSE, VNINDEX_TICKER
 
 
+def _snapshot_config_for_workers():
+    """Snapshot mutable config dicts for passing to subprocess workers."""
+    import config as cfg
+    return {
+        "MA_REGIME": dict(cfg.MA_REGIME),
+        "CROSS_MOMENTUM": dict(cfg.CROSS_MOMENTUM),
+        "IBS": dict(cfg.IBS),
+        "SIGNAL_WEIGHTS": dict(cfg.SIGNAL_WEIGHTS),
+        "SIZING": {k: (dict(v) if isinstance(v, dict) else v)
+                   for k, v in cfg.SIZING.items()},
+        "COSTS": dict(cfg.COSTS),
+        "STOCK_FILTER": dict(cfg.STOCK_FILTER),
+        "MARTIN_LUK": dict(cfg.MARTIN_LUK),
+    }
+
+
+def _apply_config_snapshot(snapshot):
+    """Apply config snapshot in a worker process."""
+    import config as cfg
+    for attr, values in snapshot.items():
+        target = getattr(cfg, attr)
+        target.clear()
+        target.update(values)
+
+
 def run_permutation_test(
     n_perm: int = 100,
     n_stocks: int = 10,
@@ -108,7 +133,9 @@ def run_permutation_test(
     # Normalize date indices to date-only (drop time component) to avoid
     # mismatch between e.g. "2019-01-21 00:00" and "2019-01-21 07:00"
     close_matrix.index = close_matrix.index.normalize()
+    close_matrix = close_matrix[~close_matrix.index.duplicated(keep="last")]
     index_prices.index = index_prices.index.normalize()
+    index_prices = index_prices[~index_prices.index.duplicated(keep="last")]
 
     # Drop columns that are entirely NaN (stocks without data)
     close_matrix = close_matrix.dropna(axis=1, how='all')
@@ -143,8 +170,10 @@ def run_permutation_test(
     for ticker in valid_cols:
         if ticker not in ohlcv_dict:
             continue
-        orig = ohlcv_dict[ticker]
+        orig = ohlcv_dict[ticker].copy()
         orig.index = orig.index.normalize()
+        # Drop duplicate dates (keep last) to avoid reindex error
+        orig = orig[~orig.index.duplicated(keep="last")]
         aligned = orig.reindex(common_idx).ffill().bfill()
         if aligned.empty or aligned["close"].isna().any():
             continue
@@ -173,6 +202,9 @@ def run_permutation_test(
     n_days = len(common_idx)
     all_shuffle_indices = [rng.permutation(n_days) for _ in range(n_perm)]
 
+    # Snapshot current config (including overrides) so workers use same settings
+    config_snap = _snapshot_config_for_workers()
+
     # Build args for workers — numpy arrays are efficiently shared
     worker_args = []
     for i in range(n_perm):
@@ -188,6 +220,7 @@ def run_permutation_test(
             capital,
             metric,
             strategy,
+            config_snap,
         ))
 
     perm_metrics = [None] * n_perm
@@ -294,7 +327,12 @@ def _run_single_permutation(args) -> float:
         capital,
         metric,
         strategy,
+        config_snapshot,
     ) = args
+
+    # Apply config overrides in this worker process (subprocess gets fresh defaults)
+    if config_snapshot:
+        _apply_config_snapshot(config_snapshot)
 
     # Shuffle returns using pre-computed index
     cm_shuffled = cm_ret_np[shuffle_idx]

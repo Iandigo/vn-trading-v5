@@ -239,10 +239,19 @@ class BacktestEngine:
                 )
                 forecast = combined["combined_forecast"]
 
-                # No new entries in BEAR regime
+                # No new entries in BEAR regime — unless top-N momentum stock
                 current_shares = int(self.holdings.get(ticker, 0))
                 if not combined["trading_allowed"] and current_shares == 0:
-                    continue
+                    bear_top_n = MA_REGIME.get("bear_top_n_entries", 0)
+                    if bear_top_n > 0 and ticker in cm_matrix.columns:
+                        # Rank by momentum forecast (highest = rank 1)
+                        today_cm = cm_matrix.loc[date].dropna().sort_values(ascending=False)
+                        rank = list(today_cm.index).index(ticker) + 1 if ticker in today_cm.index else 999
+                        if rank > bear_top_n:
+                            continue
+                        # Top-N: allow entry but combined forecast is already computed
+                    else:
+                        continue
 
                 # Volatility estimate (configurable lookback, default 60d)
                 ohlcv = ohlcv_dict.get(ticker)
@@ -329,7 +338,10 @@ class BacktestEngine:
         n_years = n_days / 365.25
         total_fees = self.cost_total
         final_equity = equity_df["equity"].iloc[-1] if not equity_df.empty else self.initial_capital
-        cost_drag_annual = (total_fees / self.initial_capital) / max(n_years, 0.1)
+        # Use average equity over the period (geometric mean of start and end)
+        # to avoid inflating drag when equity grows significantly over long periods
+        avg_equity = (self.initial_capital * final_equity) ** 0.5
+        cost_drag_annual = (total_fees / avg_equity) / max(n_years, 0.1)
 
         metrics = compute_metrics(equity_df["equity"])
         metrics["cost_drag_annual"] = round(cost_drag_annual, 4)

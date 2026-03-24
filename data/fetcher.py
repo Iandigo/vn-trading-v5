@@ -1,30 +1,39 @@
 """
 data/fetcher.py — Market Data Fetcher with Disk Cache
 =======================================================
-Primary: yfinance (free, no API key, .VN / .HN suffixes)
-Fallback: vnstock (rate-limited, register at vnstocks.com)
+Primary: VPS TradingView API (free, no auth, no rate limit)
+Fallback: vnstock v3 KBS (rate-limited 20 req/min for guest)
 
 Cache:
   Downloaded OHLCV is saved to data/cache/<TICKER>.csv.
   On re-run, only missing dates are fetched (incremental update).
-  Cache is always extended forward — never re-downloaded from scratch.
   To force a full re-fetch: delete data/cache/ or call clear_cache().
 
 Returns clean OHLCV DataFrames with proper datetime index.
+All prices are in VND (e.g., VCB = 59,000 VND, not 59.0).
 """
 
 import math
 import os
 import time
 import warnings
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
+import requests
 
 warnings.filterwarnings("ignore")
 
 CACHE_DIR = Path("data/cache")
+
+# VPS TradingView API — no auth, no rate limit
+_VPS_URL = "https://histdatafeed.vps.com.vn/tradingview/history"
+_VPS_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+# vnstock rate limit tracking (guest: 20 req/min) — fallback only
+_vnstock_calls: list = []
+_VNSTOCK_MAX_PER_MIN = 18
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────
@@ -33,7 +42,6 @@ def fetch_ohlcv(
     ticker: str,
     start: datetime,
     end: datetime,
-    chunk_days: int = 365,
     use_cache: bool = True,
 ) -> pd.DataFrame:
     """
@@ -41,7 +49,7 @@ def fetch_ohlcv(
     Checks disk cache first — only downloads missing date ranges.
 
     Returns DataFrame with columns: open, high, low, close, volume
-    Index: DatetimeIndex (timezone-naive)
+    Index: DatetimeIndex (timezone-naive), prices in VND.
     Returns empty DataFrame on failure.
     """
     start = _to_dt(start)
@@ -54,10 +62,10 @@ def fetch_ohlcv(
             cache_start = cached.index.min()
 
             missing_before = start < cache_start - timedelta(days=5)
-            missing_after  = end   > cache_end   + timedelta(days=2)
+            # Allow up to 5 days tolerance for weekends + holidays
+            missing_after  = end   > cache_end   + timedelta(days=5)
 
             if not missing_before and not missing_after:
-                # Cache fully covers requested range — return slice
                 return cached[
                     (cached.index >= pd.Timestamp(start)) &
                     (cached.index <= pd.Timestamp(end))
@@ -65,10 +73,11 @@ def fetch_ohlcv(
 
             # Only missing recent days (most common case)
             if missing_after and not missing_before:
-                fresh = _fetch_with_fallback(ticker, cache_end + timedelta(days=1), end, chunk_days)
+                fresh = _fetch_data(ticker, cache_end + timedelta(days=1), end)
                 if fresh is not None and not fresh.empty:
                     combined = pd.concat([cached, fresh])
                     combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+                    combined = _clean_ohlcv(combined)
                     _cache_save(ticker, combined)
                     return combined[
                         (combined.index >= pd.Timestamp(start)) &
@@ -80,10 +89,11 @@ def fetch_ohlcv(
                 ]
 
             # Missing earlier data — fetch full range and merge
-            fresh = _fetch_with_fallback(ticker, start, end, chunk_days)
+            fresh = _fetch_data(ticker, start, end)
             if fresh is not None and not fresh.empty:
                 combined = pd.concat([fresh, cached])
                 combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+                combined = _clean_ohlcv(combined)
                 _cache_save(ticker, combined)
                 return combined[
                     (combined.index >= pd.Timestamp(start)) &
@@ -91,7 +101,7 @@ def fetch_ohlcv(
                 ]
 
     # No usable cache — full fetch
-    df = _fetch_with_fallback(ticker, start, end, chunk_days)
+    df = _fetch_data(ticker, start, end)
     if df is None or df.empty:
         return pd.DataFrame()
 
@@ -121,9 +131,6 @@ def fetch_multi(
         df = fetch_ohlcv(ticker, start, end, use_cache=use_cache)
         if not df.empty:
             results[ticker] = df
-
-        if not from_cache:
-            time.sleep(0.3)  # Only throttle actual network requests
 
     return results
 
@@ -217,135 +224,109 @@ def _cache_covers(cached: pd.DataFrame | None, start: datetime, end: datetime) -
             cached.index.max() >= pd.Timestamp(e) - timedelta(days=2))
 
 
-# ─── Fetch helpers ────────────────────────────────────────────────────────────
+# ─── Fetch: VPS TradingView API (primary) ────────────────────────────────────
 
-def _fetch_with_fallback(ticker: str, start: datetime, end: datetime, chunk_days: int) -> pd.DataFrame | None:
-    """
-    Fetch in annual chunks. For any chunk where yfinance returns nothing,
-    immediately retry that chunk via vnstock before moving on.
-    This handles tickers like VHM.VN where Yahoo has gaps in early years
-    but vnstock has complete history.
-    """
+def _fetch_data(ticker: str, start: datetime, end: datetime) -> pd.DataFrame | None:
+    """Fetch data: try VPS first, fall back to vnstock if VPS fails."""
     start, end = _to_dt(start), _to_dt(end)
 
-    try:
-        import yfinance as yf
-        yf_available = True
-    except ImportError:
-        yf_available = False
-
-    all_chunks = []
-    cursor = start
-
-    while cursor < end:
-        chunk_end = min(cursor + timedelta(days=chunk_days), end)
-        chunk_start_str = cursor.strftime("%Y-%m-%d")
-        chunk_end_str   = chunk_end.strftime("%Y-%m-%d")
-        got_data = False
-
-        # Try yfinance for this chunk
-        if yf_available:
-            try:
-                raw = yf.download(
-                    ticker,
-                    start=chunk_start_str,
-                    end=chunk_end_str,
-                    progress=False,
-                    auto_adjust=True,
-                    timeout=30,
-                )
-                if raw is not None and not raw.empty:
-                    if isinstance(raw.columns, pd.MultiIndex):
-                        raw.columns = [c[0].lower() for c in raw.columns]
-                    else:
-                        raw.columns = [c.lower() if isinstance(c, str) else str(c).lower()
-                                       for c in raw.columns]
-                    raw.index = pd.to_datetime(raw.index).tz_localize(None)
-                    all_chunks.append(raw)
-                    got_data = True
-            except Exception:
-                pass
-
-        # yfinance returned nothing for this chunk — try vnstock immediately
-        if not got_data:
-            vn = _fetch_vnstock(ticker, cursor, chunk_end)
-            if vn is not None and not vn.empty:
-                all_chunks.append(vn)
-                print(f"  [fetcher] Data for {ticker} {chunk_start_str} -> {chunk_end_str} from vnstock")
-            else:
-                print(f"  [fetcher] No data for {ticker} {chunk_start_str} -> {chunk_end_str} from either source")
-
-        cursor = chunk_end + timedelta(days=1)
-        time.sleep(0.2)
-
-    if not all_chunks:
+    # Skip very short gaps (<=5 days) — likely weekend/holiday
+    if (end - start).days <= 5:
         return None
 
-    df = pd.concat(all_chunks)
-    df = df[~df.index.duplicated(keep="last")].sort_index()
+    symbol = _to_symbol(ticker)
+
+    # Try VPS TradingView API (no rate limit)
+    df = _fetch_vps(symbol, start, end)
+    if df is not None and not df.empty:
+        return df
+
+    # Fallback to vnstock (rate-limited)
+    print(f"  [fetcher] VPS failed for {symbol}, trying vnstock...")
+    df = _fetch_vnstock(ticker, start, end)
     return df
 
-def _fetch_yfinance_chunked(ticker: str, start: datetime, end: datetime, chunk_days: int) -> pd.DataFrame | None:
-    """Fetch from yfinance in annual chunks to avoid read timeouts."""
+
+def _fetch_vps(symbol: str, start: datetime, end: datetime) -> pd.DataFrame | None:
+    """
+    Fetch from VPS TradingView API.
+    No auth required, no rate limit, supports stocks + indices.
+    Returns prices in thousands VND (rescaled to VND before return).
+    """
+    ts_from = int(start.replace(tzinfo=timezone.utc).timestamp())
+    ts_to   = int(end.replace(tzinfo=timezone.utc).timestamp())
+
     try:
-        import yfinance as yf
-    except ImportError:
-        print("  [fetcher] yfinance not installed. Run: pip install yfinance")
+        resp = requests.get(
+            _VPS_URL,
+            params={
+                "symbol": symbol,
+                "resolution": "D",
+                "from": str(ts_from),
+                "to": str(ts_to),
+            },
+            headers=_VPS_HEADERS,
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json()
+        if data.get("s") == "no_data" or "t" not in data or not data["t"]:
+            return None
+
+        df = pd.DataFrame({
+            "open":   data["o"],
+            "high":   data["h"],
+            "low":    data["l"],
+            "close":  data["c"],
+            "volume": data["v"],
+        })
+        df.index = pd.to_datetime(
+            [datetime.fromtimestamp(t, tz=timezone.utc).replace(tzinfo=None) for t in data["t"]]
+        )
+        df.index.name = "date"
+
+        # VPS returns prices in thousands VND (e.g., 59.0 = 59,000 VND).
+        # Rescale to actual VND to match capital units.
+        _rescale_thousands_vnd(df, symbol)
+
+        return df
+
+    except Exception as e:
+        print(f"  [fetcher] VPS error for {symbol}: {e}")
         return None
 
-    chunks = []
-    cursor = _to_dt(start)
-    while cursor < _to_dt(end):
-        chunk_end = min(cursor + timedelta(days=chunk_days), _to_dt(end))
-        try:
-            raw = yf.download(
-                ticker,
-                start=cursor.strftime("%Y-%m-%d"),
-                end=chunk_end.strftime("%Y-%m-%d"),
-                progress=False,
-                auto_adjust=True,
-                timeout=30,
-            )
-            if raw is not None and not raw.empty:
-                chunks.append(raw)
-        except Exception as e:
-            print(f"  [fetcher] yfinance chunk error for {ticker}: {e}")
-        cursor = chunk_end + timedelta(days=1)
-        time.sleep(0.2)
 
-    if not chunks:
-        return None
+# ─── Fetch: vnstock (fallback) ───────────────────────────────────────────────
 
-    df = pd.concat(chunks)
-    df = df[~df.index.duplicated(keep="first")]
-    df.index = pd.to_datetime(df.index).tz_localize(None)
-
-    # yfinance >=0.2.x returns MultiIndex columns like ("Close", "VCB.VN")
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0].lower() for c in df.columns]
-    else:
-        df.columns = [c.lower() if isinstance(c, str) else str(c).lower()
-                      for c in df.columns]
-    return df
+def _vnstock_rate_check() -> bool:
+    """Check if we can make a vnstock call without hitting rate limit. Waits if needed."""
+    now = time.time()
+    _vnstock_calls[:] = [t for t in _vnstock_calls if now - t < 60]
+    if len(_vnstock_calls) >= _VNSTOCK_MAX_PER_MIN:
+        wait = 60 - (now - _vnstock_calls[0]) + 1
+        if wait > 0:
+            print(f"  [fetcher] vnstock rate limit: waiting {wait:.0f}s...")
+            time.sleep(wait)
+            _vnstock_calls.clear()
+    _vnstock_calls.append(time.time())
+    return True
 
 
 def _fetch_vnstock(ticker: str, start: datetime, end: datetime) -> pd.DataFrame | None:
     """
     Fallback to vnstock v3 (pip install vnstock>=3.0).
-    Uses KBS source via Quote.history() — works for stocks AND indices (VNINDEX, VN30).
-
-    vnstock v3 API changed completely from v0.x:
-      OLD (broken): from vnstock import stock_historical_data
-      NEW (correct): from vnstock.explorer.kbs.quote import Quote
+    Uses KBS source via Quote.history().
     """
-    # Strip exchange suffix: VCB.VN → VCB, VNINDEX stays VNINDEX
-    symbol = ticker.replace(".VN", "").replace(".HN", "").upper()
+    _vnstock_rate_check()
+
+    symbol = _to_symbol(ticker)
 
     try:
         from vnstock.explorer.kbs.quote import Quote
     except ImportError:
         try:
-            # Older v3 path
             from vnstock import Vnstock
             q = Vnstock().stock(symbol=symbol, source="KBS").quote
         except ImportError:
@@ -372,21 +353,40 @@ def _fetch_vnstock(ticker: str, start: datetime, end: datetime) -> pd.DataFrame 
         if raw is None or raw.empty:
             return None
 
-        # v3 returns columns: time, open, high, low, close, volume
         raw.columns = [c.lower() for c in raw.columns]
 
-        # Set index to the date column (named "time" in v3)
         if "time" in raw.columns:
             raw = raw.set_index("time")
         elif "date" in raw.columns:
             raw = raw.set_index("date")
 
         raw.index = pd.to_datetime(raw.index).tz_localize(None)
+
+        # vnstock also returns prices in thousands VND — rescale to VND
+        _rescale_thousands_vnd(raw, symbol)
+
         return raw
 
     except Exception as e:
         print(f"  [fetcher] vnstock error for {symbol}: {e}")
         return None
+
+
+# ─── Data cleaning ───────────────────────────────────────────────────────────
+
+def _rescale_thousands_vnd(df: pd.DataFrame, symbol: str):
+    """
+    Both VPS and vnstock return prices in thousands VND (e.g., 15.30 = 15,300 VND).
+    Detect and rescale to actual VND so prices match capital units.
+    """
+    if "close" not in df.columns or df.empty:
+        return
+    median_close = float(df["close"].median())
+    if 0 < median_close < 500:
+        for col in ["open", "high", "low", "close"]:
+            if col in df.columns:
+                df[col] = df[col] * 1000
+        print(f"  [fetcher] {symbol}: rescaled x1000 ({median_close:.1f} -> {median_close*1000:.0f} VND)")
 
 
 def _clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
@@ -405,37 +405,50 @@ def _clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df[required + (["volume"] if "volume" in df.columns else [])].copy()
     df = df[(df["close"] > 0) & (df["high"] >= df["low"])]
+
+    # Normalize timestamps to midnight — different data sources return different
+    # timezone offsets (e.g. 00:00 vs 07:00 for the same trading day).
+    # Without this, close_matrix alignment fails silently.
+    df.index = df.index.normalize()
+    df = df[~df.index.duplicated(keep="last")]
+
     df = df.sort_index()
 
-    # ── Detect corrupted prices (spikes >50% day-to-day) ──────────────────
-    # VN stocks have ±7% daily limit (HOSE), so any >50% jump is data corruption
-    # from yfinance auto_adjust miscalculating corporate actions.
+    # ── Detect corrupted prices (spikes >15% day-to-day) ──────────────────
+    # VN stocks have ±7% daily limit (HOSE). A >15% change indicates
+    # corrupted data or unadjusted corporate actions.
     if len(df) > 1:
         pct_change = df["close"].pct_change().abs()
-        spike_mask = pct_change > 0.50  # 50% daily change = impossible on HOSE
-        spike_mask.iloc[0] = False      # first row has NaN pct_change
+        spike_mask = pct_change > 0.15
+        spike_mask.iloc[0] = False
         n_spikes = spike_mask.sum()
         if n_spikes > 0:
-            # Remove the corrupted rows (and everything after if it's a level shift)
+            spike_dates = df.index[spike_mask].tolist()
+            print(f"  [clean] detected {n_spikes} price spike(s) >15% at {[str(d.date()) for d in spike_dates[:5]]}")
+
             first_spike_idx = spike_mask.idxmax()
-            # Check if it's a level shift (prices stay high) vs isolated spike
             post_spike = df.loc[first_spike_idx:, "close"]
             pre_spike = df.loc[:first_spike_idx, "close"].iloc[:-1]
             if len(pre_spike) > 0 and len(post_spike) > 1:
                 pre_median = pre_spike.tail(20).median()
                 post_median = post_spike.head(5).median()
                 if post_median > pre_median * 2:
-                    # Level shift — all data from spike onward is corrupted
                     df = df.loc[:first_spike_idx].iloc[:-1]
                     print(f"  [clean] Removed {n_spikes} corrupted rows from {first_spike_idx} onward (price level shift)")
                 else:
-                    # Isolated spikes — just remove those rows
                     df = df[~spike_mask]
                     print(f"  [clean] Removed {n_spikes} price spike rows")
 
     df = df.ffill()
     df = df.dropna()
     return df
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+def _to_symbol(ticker: str) -> str:
+    """Convert ticker to exchange symbol: VCB.VN → VCB, VNINDEX stays VNINDEX."""
+    return ticker.replace(".VN", "").replace(".HN", "").upper()
 
 
 def _to_dt(d) -> datetime:
@@ -454,32 +467,25 @@ def fetch_index_prices(
     use_cache: bool = True,
 ) -> "pd.Series":
     """
-    Fetch VNIndex with a graceful three-level fallback chain.
+    Fetch VNIndex with a graceful fallback chain.
 
     Level 1: primary_ticker  (e.g. "VNINDEX")
     Level 2: fallback_tickers (e.g. ["E1VFVN30.VN", "VN30F1M.VN"])
     Level 3: universe mean   (portfolio average — good enough for MA-regime detection)
-
-    ^VNINDEX was removed from Yahoo Finance ~2025. Use this function instead of
-    fetch_ohlcv(VNINDEX_TICKER, ...) everywhere index prices are needed.
     """
     for ticker in [primary_ticker] + (fallback_tickers or []):
         df = fetch_ohlcv(ticker, start, end, use_cache=use_cache)
         if not df.empty:
             close = df["close"]
-            # Scale sanity check: VNIndex has always been > 100 points.
-            # Some data sources (vnstock, yfinance auto_adjust) return values
-            # divided by 1000 (e.g., 1.16 instead of 1160).
             median_val = float(close.median())
+            # VNIndex should be > 100 points. If still scaled wrong, fix it.
             if median_val < 100:
-                scale = 1000.0
-                close = close * scale
-                print(f"  [index] Rescaled {ticker} by {scale}x (median was {median_val:.2f}, now {median_val*scale:.0f})")
-                # Re-save corrected data to cache
+                close = close * 1000
+                print(f"  [index] Rescaled {ticker} by 1000x (median was {median_val:.2f})")
                 df_corrected = df.copy()
                 for col in ["open", "high", "low", "close"]:
                     if col in df_corrected.columns:
-                        df_corrected[col] = df_corrected[col] * scale
+                        df_corrected[col] = df_corrected[col] * 1000
                 _cache_save(ticker, df_corrected)
             print(f"  [index] Using {ticker} as market index proxy")
             return close

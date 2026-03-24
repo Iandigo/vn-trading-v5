@@ -10,6 +10,7 @@ import LivePortfolio from './pages/LivePortfolio'
 import Scanner from './pages/Scanner'
 import Config from './pages/Config'
 import RunBacktest from './pages/RunBacktest'
+import CarverSignals from './pages/CarverSignals'
 
 export default function App() {
   const [page, setPage] = useState<Page>('scanner')
@@ -25,6 +26,7 @@ export default function App() {
       case 'portfolio':   return <LivePortfolio />
       case 'config':      return <Config />
       case 'run':         return <RunBacktest onDone={() => setPage('results')} />
+      case 'carver':      return <CarverSignals />
       default:            return <Scanner onTrade={() => setPage('portfolio')} />
     }
   }

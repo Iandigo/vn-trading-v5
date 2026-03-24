@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Play, CheckCircle, XCircle, Loader } from 'lucide-react'
-import { startBacktest, fetchJob, fetchUniverse } from '../api/client'
+import { Play, CheckCircle, XCircle, Loader, Trash2 } from 'lucide-react'
+import { startBacktest, fetchJob, fetchUniverse, clearCache } from '../api/client'
 import type { Job, Metrics, Strategy } from '../types'
 import { fmtPct, fmtNum } from '../utils/format'
 
@@ -219,8 +219,8 @@ export default function RunBacktest({ onDone }: Props) {
           </div>
         </div>
 
-        {/* Run button */}
-        <div className="pt-2 border-t border-border">
+        {/* Run button + Delete Cache */}
+        <div className="pt-2 border-t border-border flex items-center gap-3">
           <button className="btn-primary text-base px-8 py-3 flex items-center gap-2"
             onClick={handleRun} disabled={isRunning || runMut.isPending}>
             {isRunning ? (
@@ -228,6 +228,21 @@ export default function RunBacktest({ onDone }: Props) {
             ) : (
               <><Play size={16} /> Run Backtest</>
             )}
+          </button>
+          <button
+            className="px-4 py-3 text-sm rounded-lg border border-danger/40 text-danger hover:bg-danger/10 transition-colors flex items-center gap-2 disabled:opacity-50"
+            disabled={isRunning}
+            onClick={async () => {
+              if (!confirm('Delete all cached market data? Next backtest will re-fetch everything from scratch.')) return
+              try {
+                const res = await clearCache()
+                alert(`Deleted ${res.files_deleted} cached files. Data will be re-fetched on next run.`)
+              } catch {
+                alert('Failed to clear cache.')
+              }
+            }}
+          >
+            <Trash2 size={14} /> Delete Cache
           </button>
         </div>
       </div>

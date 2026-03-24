@@ -4,6 +4,7 @@ import {
   Clock,
   Crosshair,
   FlaskConical,
+  LineChart,
   Play,
   Settings,
   Thermometer,
@@ -18,6 +19,7 @@ interface SidebarProps {
 
 const NAV: { id: Page; label: string; icon: React.FC<{ size?: number; className?: string }> }[] = [
   { id: 'scanner',     label: 'Live Scanner',      icon: Crosshair },
+  { id: 'carver',      label: 'Carver Signals',    icon: LineChart },
   { id: 'portfolio',   label: 'Portfolio',          icon: Wallet },
   { id: 'run',         label: 'Run Backtest',      icon: Play },
   { id: 'results',     label: 'Backtest Results',  icon: BarChart2 },
@@ -30,7 +32,7 @@ const NAV: { id: Page; label: string; icon: React.FC<{ size?: number; className?
 
 export default function Sidebar({ current, onChange }: SidebarProps) {
   return (
-    <aside className="w-56 flex-shrink-0 bg-card border-r border-border flex flex-col min-h-screen">
+    <aside className="w-56 flex-shrink-0 bg-card border-r border-border flex flex-col h-screen sticky top-0">
       {/* Logo */}
       <div className="px-5 py-4 border-b border-border">
         <div className="flex items-center gap-2">

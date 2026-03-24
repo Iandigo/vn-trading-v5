@@ -86,8 +86,11 @@ export default function BacktestTrades() {
   })
 
   const [filter, setFilter] = useState('')
+  const [stockFilter, setStockFilter] = useState('')
+  const [orderFilter, setOrderFilter] = useState<'' | 'BUY' | 'SELL'>('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
+  const [pendingFilters, setPendingFilters] = useState(false)
   const [page, setPage] = useState(1)
   const pageSize = 50
 
@@ -126,7 +129,12 @@ export default function BacktestTrades() {
   const isSwing = selectedRun?.params?.strategy === 'martin_luk' ||
     trades.some(t => t.reason != null && t.reason !== '')
 
+  // Unique tickers for dropdown
+  const uniqueTickers = [...new Set(trades.map(t => t.ticker))].sort()
+
   const filteredTrades = trades.filter(t => {
+    if (stockFilter && t.ticker !== stockFilter) return false
+    if (orderFilter && t.action !== orderFilter) return false
     if (filter && !t.ticker.includes(filter.toUpperCase()) && !t.action.includes(filter.toUpperCase())
         && !(t.reason && t.reason.toLowerCase().includes(filter.toLowerCase()))) return false
     const d = t.date.slice(0, 10)
@@ -289,22 +297,51 @@ export default function BacktestTrades() {
           <h2 className="text-lg font-semibold text-gray-200">All Trades</h2>
           <div className="flex-1" />
           <div className="flex items-center gap-2">
+            <label className="text-xs text-gray-500">Stock</label>
+            <select className="select text-sm w-32" value={stockFilter}
+              onChange={e => { setStockFilter(e.target.value); setPendingFilters(true) }}>
+              <option value="">All</option>
+              {uniqueTickers.map(t => (
+                <option key={t} value={t}>{t.replace('.VN', '')}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-gray-500">Order</label>
+            <select className="select text-sm w-24" value={orderFilter}
+              onChange={e => { setOrderFilter(e.target.value as '' | 'BUY' | 'SELL'); setPendingFilters(true) }}>
+              <option value="">All</option>
+              <option value="BUY">BUY</option>
+              <option value="SELL">SELL</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-2">
             <label className="text-xs text-gray-500">From</label>
             <input type="date" className="input text-sm w-36" value={dateFrom}
-              onChange={e => { setDateFrom(e.target.value); setPage(1) }} />
+              onChange={e => { setDateFrom(e.target.value); setPendingFilters(true) }} />
           </div>
           <div className="flex items-center gap-2">
             <label className="text-xs text-gray-500">To</label>
             <input type="date" className="input text-sm w-36" value={dateTo}
-              onChange={e => { setDateTo(e.target.value); setPage(1) }} />
+              onChange={e => { setDateTo(e.target.value); setPendingFilters(true) }} />
           </div>
-          {(dateFrom || dateTo) && (
-            <button className="text-xs text-gray-500 hover:text-gray-300" onClick={() => { setDateFrom(''); setDateTo(''); setPage(1) }}>
-              Clear dates
+          <input className="input text-sm w-40" placeholder="Search reason..."
+            value={filter} onChange={e => { setFilter(e.target.value); setPendingFilters(true) }} />
+          <button
+            className={`text-sm px-4 py-1.5 rounded-lg font-semibold transition-colors ${
+              pendingFilters ? 'bg-primary text-white hover:bg-primary/80' : 'bg-card text-gray-400'
+            }`}
+            onClick={() => { setPage(1); setPendingFilters(false) }}
+          >
+            Filter
+          </button>
+          {(stockFilter || orderFilter || dateFrom || dateTo || filter) && (
+            <button className="text-xs text-gray-500 hover:text-gray-300" onClick={() => {
+              setStockFilter(''); setOrderFilter(''); setDateFrom(''); setDateTo(''); setFilter(''); setPage(1); setPendingFilters(false)
+            }}>
+              Clear all
             </button>
           )}
-          <input className="input text-sm w-48" placeholder="Filter ticker / action..."
-            value={filter} onChange={e => { setFilter(e.target.value); setPage(1) }} />
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">

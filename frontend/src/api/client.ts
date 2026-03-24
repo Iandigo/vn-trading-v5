@@ -1,6 +1,7 @@
 import axios from 'axios'
 import type {
   BacktestRun,
+  CarverSignalsData,
   ConfigData,
   EquityPoint,
   Job,
@@ -10,6 +11,8 @@ import type {
   RegimeData,
   ScannerData,
   Trade,
+  WalkForwardData,
+  WfPermutationData,
 } from '../types'
 
 const api = axios.create({ baseURL: '/api' })
@@ -56,6 +59,48 @@ export async function fetchPermutation(): Promise<PermutationData> {
   return data
 }
 
+// ─── Walk-Forward ────────────────────────────────────────────────────────────
+export async function fetchWalkForward(): Promise<WalkForwardData> {
+  const { data } = await api.get('/walk-forward')
+  return data
+}
+
+export async function fetchWfPermutation(): Promise<WfPermutationData> {
+  const { data } = await api.get('/wf-permutation')
+  return data
+}
+
+export interface WalkForwardParams {
+  years: number
+  train_years: number
+  test_months: number
+  n_stocks: number
+  strategy: string
+  metric: string
+  use_real: boolean
+}
+
+export interface WfPermutationParams {
+  n_perm: number
+  years: number
+  train_years: number
+  test_months: number
+  n_stocks: number
+  strategy: string
+  metric: string
+  use_real: boolean
+}
+
+export async function startWalkForward(params: WalkForwardParams): Promise<string> {
+  const { data } = await api.post('/run-walk-forward', params)
+  return data.job_id
+}
+
+export async function startWfPermutation(params: WfPermutationParams): Promise<string> {
+  const { data } = await api.post('/run-wf-permutation', params)
+  return data.job_id
+}
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 export async function fetchConfig(): Promise<ConfigData> {
   const { data } = await api.get('/config')
@@ -68,6 +113,11 @@ export async function saveConfig(overrides: Record<string, number | boolean>): P
 
 export async function clearConfigOverrides(): Promise<void> {
   await api.delete('/config/overrides')
+}
+
+export async function saveConfigToFile(): Promise<{ saved: boolean; changes: number; keys: string[] }> {
+  const { data } = await api.post('/config/save-to-file')
+  return data
 }
 
 // ─── Portfolio ────────────────────────────────────────────────────────────────
@@ -99,6 +149,18 @@ export async function deleteTrade(index: number): Promise<void> {
 
 export async function deleteHolding(ticker: string): Promise<void> {
   await api.delete(`/portfolio/holding/${encodeURIComponent(ticker)}`)
+}
+
+// ─── Cache ───────────────────────────────────────────────────────────────────
+export async function clearCache(): Promise<{ cleared: boolean; files_deleted: number }> {
+  const { data } = await api.delete('/cache')
+  return data
+}
+
+// ─── Carver Signals ──────────────────────────────────────────────────────────
+export async function fetchCarverSignals(nStocks = 30, capital = 500_000_000): Promise<CarverSignalsData> {
+  const { data } = await api.get('/carver-signals', { params: { n_stocks: nStocks, capital } })
+  return data
 }
 
 // ─── Scanner ─────────────────────────────────────────────────────────────────

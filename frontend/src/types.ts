@@ -104,6 +104,64 @@ export interface PermutationData {
   perm_distribution: number[]
 }
 
+export interface WalkForwardWindow {
+  window_id: number
+  train_start: string
+  train_end: string
+  test_start: string
+  test_end: string
+  best_params: Record<string, number>
+  train_metric: number
+  test_metric: number
+  efficiency: number
+}
+
+export interface WalkForwardData {
+  available: boolean
+  strategy: string
+  metric: string
+  years: number
+  train_years: number
+  test_months: number
+  n_stocks: number
+  n_windows: number
+  n_combos: number
+  param_keys: string[]
+  windows: WalkForwardWindow[]
+  oos_metrics: Record<string, number | string>
+  is_avg_metric: number
+  oos_metric: number
+  wf_efficiency: number
+  verdict: 'PASS' | 'MARGINAL' | 'FAIL'
+  oos_equity_curve: Array<{ date: string; equity: number }>
+}
+
+export interface WfPermutationData {
+  available: boolean
+  test_type: string
+  metric: string
+  strategy: string
+  real_wf_oos_value: number
+  wf_efficiency: number
+  p_value: number
+  p_ci_low: number
+  p_ci_high: number
+  n_permutations: number
+  perm_mean: number
+  perm_median: number
+  perm_std: number
+  perm_p5: number
+  perm_p95: number
+  n_beats_real: number
+  verdict: string
+  years: number
+  n_stocks: number
+  train_years: number
+  test_months: number
+  n_windows: number
+  perm_distribution: number[]
+}
+
 export interface ConfigData {
   MA_REGIME: Record<string, number | boolean>
   CROSS_MOMENTUM: Record<string, number>
@@ -113,6 +171,7 @@ export interface ConfigData {
   FORECAST_CAP: number
   SIZING: Record<string, number>
   COSTS: Record<string, number>
+  MARTIN_LUK: Record<string, number | boolean>
   BACKTEST: Record<string, number>
   UNIVERSE: string[]
   overrides: Record<string, number | boolean>
@@ -187,6 +246,41 @@ export interface PortfolioHolding {
   entry_date?: string
 }
 
+export interface CarverStock {
+  ticker: string
+  close: number | null
+  momentum_return: number | null
+  momentum_rank: number | null
+  cm_forecast: number
+  ibs_forecast: number
+  combined_forecast: number
+  signal: 'BUY' | 'HOLD' | 'REDUCE' | 'NEUTRAL' | 'NO_DATA'
+  optimal_shares: number
+  position_value: number
+  annual_vol: number | null
+}
+
+export interface CarverSignalsData {
+  available: boolean
+  scan_date: string | null
+  regime: string
+  tau_multiplier: number
+  stocks: CarverStock[]
+  summary: {
+    buy: number
+    hold: number
+    reduce: number
+    neutral: number
+    total: number
+  }
+  total_exposure: number
+  capital: number
+  exposure_pct: number
+  n_active_positions: number
+  idm: number
+  error?: string
+}
+
 export type Page =
   | 'results'
   | 'trades'
@@ -195,5 +289,6 @@ export type Page =
   | 'regime'
   | 'portfolio'
   | 'scanner'
+  | 'carver'
   | 'config'
   | 'run'
